@@ -2,6 +2,10 @@
 
 This project is a terminal-based Python application for managing a delta-neutral funding rate farming strategy on the Aster DEX. The application's architecture is designed to be modular, testable, and secure, separating concerns into three main components.
 
+## Dashboard Preview
+
+![Terminal Screenshot](terminal.png)
+
 ## Core Architecture
 
 The application is built on a three-tier architecture, ensuring a clean separation between exchange communication, strategy computation, and user interaction.
@@ -69,6 +73,8 @@ Once your dependencies are installed and your `.env` file is configured, you can
 ```bash
 python delta_neutral_bot.py
 ```
+
+### Method 2: Running with Docker (Recommended for Development)
 
 #### 1. Prerequisites
 
