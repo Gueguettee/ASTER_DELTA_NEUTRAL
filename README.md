@@ -1,4 +1,4 @@
-# Delta-Neutral Funding Rate Farming Bot
+# ASTER DEX Delta-Neutral Funding Rate Farming Bot
 
 This project is a terminal-based Python application for managing a delta-neutral funding rate farming strategy on the Aster DEX. The application's architecture is designed to be modular, testable, and secure, separating concerns into three main components.
 
