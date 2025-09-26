@@ -2,6 +2,8 @@
 
 This project is a terminal-based Python application for managing a delta-neutral funding rate farming strategy on the Aster DEX. The application's architecture is designed to be modular, testable, and secure, separating concerns into three main components.
 
+Referral link to support this work: https://www.asterdex.com/en/referral/164f81 . Earn 10% rebate on fees (I put maximum for you).
+
 ## Dashboard Preview
 
 ![Terminal Screenshot](terminal.png)
