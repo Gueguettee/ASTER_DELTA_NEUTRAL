@@ -60,6 +60,8 @@ APIV1_PUBLIC_KEY=...
 APIV1_PRIVATE_KEY=...
 ```
 
+See also `.env.example.`
+
 #### 3. Run the Bot
 
 Once your dependencies are installed and your `.env` file is configured, you can start the application by running the main script:
