@@ -509,150 +509,901 @@ class DashboardApp:
 
     def _render_portfolio_summary(self):
         """Renders the summary of portfolio balances."""
-        print(Fore.GREEN + "\n--- Portfolio Summary ---" + Style.RESET_ALL)
-        total_portfolio_value = self.perp_margin_balance + self.spot_usdt_balance
-        print(f"  Perp Margin Balance: ${self.perp_margin_balance:,.2f} (USDT: {self.perp_usdt_balance:.2f}, USDC: {self.perp_usdc_balance:.2f}, USDF: {self.perp_usdf_balance:.2f})")
-        print(f"  Spot USDT Balance:   ${self.spot_usdt_balance:,.2f}")
-        print(f"  Total Portfolio USD: ${total_portfolio_value:,.2f}")
+        print()  # Single line break before section
+        render_portfolio_summary(
+            self.perp_usdt_balance,
+            self.perp_usdc_balance,
+            self.perp_usdf_balance,
+            self.spot_usdt_balance,
+            title="Portfolio Summary",
+            indent=""
+        )
 
     def _render_all_perp_positions(self):
         """Renders a detailed view of all raw perpetual positions."""
-        print(Fore.GREEN + "\n--- All Perpetual Positions (Raw) ---" + Style.RESET_ALL)
         if not self.raw_perp_positions:
+            print(Fore.GREEN + "\n--- All Perpetual Positions (Raw) ---" + Style.RESET_ALL)
             print("  No open perpetual positions.")
             return
-        
-        header = f"  {'Symbol':<12} {'Amount':>12} {'Entry Price':>15} {'Mark Price':>15} {'Unrealized PNL':>18}"
-        print(header)
-        print("  " + "-" * len(header))
 
+        # Enhance position data with calculated fields for the common function
+        enhanced_positions = []
         for pos in self.raw_perp_positions:
-            amount = float(pos.get('positionAmt', 0))
+            position_amt = float(pos.get('positionAmt', 0))
             entry_price = float(pos.get('entryPrice', 0))
-            mark_price = float(pos.get('markPrice', entry_price)) # Use entry if mark not fetched
-            pnl = (mark_price - entry_price) * amount if amount != 0 else 0
-            
-            pnl_color = Fore.GREEN if pnl >= 0 else Fore.RED
-            print(f"  {pos.get('symbol', 'N/A'):<12} {amount:>12.6f} {entry_price:>15,.4f} {mark_price:>15,.4f} {pnl_color}{pnl:>18,.2f}{Style.RESET_ALL}")
+            mark_price = float(pos.get('markPrice', entry_price))
+            leverage = float(pos.get('leverage', 1))
+
+            # Calculate PnL percentage
+            if entry_price > 0:
+                if position_amt > 0:  # Long position
+                    pnl_pct = ((mark_price - entry_price) / entry_price) * 100
+                else:  # Short position
+                    pnl_pct = ((entry_price - mark_price) / entry_price) * 100
+            else:
+                pnl_pct = 0.0
+
+            # Calculate notional value and unrealized PnL
+            notional_value = abs(position_amt) * mark_price
+            unrealized_pnl = float(pos.get('unrealizedProfit', 0))
+
+            # If unrealizedProfit is not available, calculate it
+            if unrealized_pnl == 0 and position_amt != 0:
+                unrealized_pnl = (mark_price - entry_price) * position_amt
+
+            # Create enhanced position with calculated fields
+            enhanced_pos = pos.copy()
+            enhanced_pos.update({
+                'mark_price': mark_price,
+                'pnl_pct': pnl_pct,
+                'notional_value': notional_value,
+                'leverage': leverage,
+                'unrealizedProfit': unrealized_pnl
+            })
+            enhanced_positions.append(enhanced_pos)
+
+        # Use common function to render the table
+        render_perpetual_positions_table(
+            enhanced_positions,
+            title="--- All Perpetual Positions (Raw) ---",
+            show_summary=False,  # Don't show summary in dashboard to save space
+            indent=""
+        )
 
     def _render_delta_neutral_positions(self):
         """Renders the analyzed delta-neutral positions."""
-        print(Fore.GREEN + "\n--- Delta-Neutral Positions ---" + Style.RESET_ALL)
-        
-        dn_positions = [p for p in self.positions if p.get('is_delta_neutral')]
-        
-        if not dn_positions:
-            print("  No delta-neutral positions found.")
-            return
-
-        header = f"  {'Symbol':<12} {'Spot Balance':>15} {'Perp Position':>15} {'Net Delta':>12} {'Value (USD)':>15} {'Imbalance':>12} {'APR (%)':>10}"
-        print(header)
-        print("  " + "-" * len(header))
-
-        for pos in dn_positions:
-            symbol = pos.get('symbol', 'N/A')
-            spot_balance = pos.get('spot_balance', 0.0)
-            perp_position = pos.get('perp_position', 0.0)
-            net_delta = pos.get('net_delta', 0.0)
-            value_usd = pos.get('position_value_usd', 0.0)
-            imbalance = pos.get('imbalance_pct', 0.0)
-            apr = pos.get('current_apr', 'N/A')
-            apr_str = f"{apr:.2f}" if isinstance(apr, (int, float)) else str(apr)
-
-            print(Fore.CYAN + f"  {symbol:<12} {spot_balance:>15.6f} {perp_position:>15.6f} {net_delta:>12.6f} {value_usd:>15,.2f} {imbalance:>11.2f}% {apr_str:>10}" + Style.RESET_ALL)
+        render_delta_neutral_positions(
+            self.positions,
+            title="Delta-Neutral Positions",
+            indent=""
+        )
 
     def _render_other_positions(self):
         """Renders non-delta-neutral positions, like spot-only holdings or imbalanced pairs."""
-        print(Fore.GREEN + "\n--- Other Holdings (Non-Delta-Neutral) ---" + Style.RESET_ALL)
-        
-        other_positions = [p for p in self.positions if not p.get('is_delta_neutral')]
-
-        if not other_positions:
-            print("  No other holdings found.")
-            return
-
-        header = f"  {'Symbol':<12} {'Spot Balance':>15} {'Perp Position':>15} {'Net Delta':>12} {'Value (USD)':>15} {'Imbalance':>12}"
-        print(header)
-        print("  " + "-" * len(header))
-
-        for pos in other_positions:
-            symbol = pos.get('symbol', 'N/A')
-            spot_balance = pos.get('spot_balance', 0.0)
-            perp_position = pos.get('perp_position', 0.0)
-            net_delta = pos.get('net_delta', 0.0)
-            value_usd = pos.get('position_value_usd', 0.0)
-            imbalance = pos.get('imbalance_pct', 0.0)
-
-            print(Fore.YELLOW + f"  {symbol:<12} {spot_balance:>15.6f} {perp_position:>15.6f} {net_delta:>12.6f} {value_usd:>15,.2f} {imbalance:>11.2f}%" + Style.RESET_ALL)
+        render_other_positions(
+            self.positions,
+            title="Other Holdings (Non-Delta-Neutral)",
+            indent=""
+        )
 
     def _render_spot_balances(self):
         """Renders non-stablecoin spot balances including their USD value."""
-        print(Fore.GREEN + "\n--- Spot Balances (Excluding Stables) ---" + Style.RESET_ALL)
-        
-        non_stable_balances = [b for b in self.spot_balances if b.get('asset') not in ['USDT', 'USDC', 'USDF']]
-        
-        if not non_stable_balances:
-            print("  No significant non-stablecoin spot balances found.")
-            return
-
-        header = f"  {'Asset':<10} {'Free':>15} {'Locked':>15} {'Value (USD)':>18}"
-        print(header)
-        print("  " + "-" * (len(header) + 4))
-
-        for balance in non_stable_balances:
-            asset = balance.get('asset', 'N/A')
-            free = float(balance.get('free', 0))
-            locked = float(balance.get('locked', 0))
-            value_usd = balance.get('value_usd', 0.0)
-            print(f"  {asset:<10} {free:>15.6f} {locked:>15.6f} {value_usd:>18,.2f}")
+        render_spot_balances(
+            self.spot_balances,
+            title="Spot Balances (Excluding Stables)",
+            indent=""
+        )
 
     def _render_opportunities(self):
         """Renders potential opportunities for new positions."""
-        if not self.opportunities:
-            return # Do not render the section if there are no opportunities
-        
-        print(Fore.GREEN + "\n--- Potential Opportunities ---" + Style.RESET_ALL)
-        for opp in self.opportunities:
-            print(f"  - {opp}")
+        render_opportunities(
+            self.opportunities,
+            title="Potential Opportunities",
+            indent=""
+        )
 
     def _render_funding_rate_scan(self):
         """Renders the results of an on-demand funding rate scan."""
         if not self.funding_rate_cache:
             return # Don't render if no scan has been run
 
-        print(Fore.GREEN + "\n--- Top Funding Rate APRs (On-Demand Scan) ---" + Style.RESET_ALL)
-        header = f"  {'Symbol':<12} {'Current Rate':>15} {'Annualized APR (%)':>20}"
-        print(header)
-        print("  " + "-" * len(header))
-
-        for item in self.funding_rate_cache:
-            rate = item.get('rate', 0)
-            apr = item.get('apr', 0)
-            apr_color = Fore.GREEN if apr > 0 else Fore.RED
-            print(f"  {item.get('symbol', 'N/A'):<12} {rate:>15.6f} {apr_color}{apr:>20.2f}{Style.RESET_ALL}")
+        # Use common function to render the table
+        render_funding_rates_table(
+            self.funding_rate_cache,
+            title="--- Top Funding Rate APRs (On-Demand Scan) ---",
+            show_summary=False,
+            indent=""
+        )
 
     def _render_logs(self):
         """Renders the most recent log messages."""
         print(Fore.GREEN + "\n--- Logs ---" + Style.RESET_ALL)
         if not self.log_messages:
-            print("  No log messages.")
+            print("No log messages.")
             return
-        
+
         for msg in self.log_messages:
             # The message should already have color codes if needed
-            print(f"  {msg}")
+            print(f"{msg}")
 
     def _render_menu(self):
         """Renders the main menu of available actions."""
         print(Fore.CYAN + "\n--- Menu ---" + Style.RESET_ALL)
-        print("  [R] Refresh Data   [O] Open Position   [C] Close Position   [F] Scan Funding Rates   [Q] Quit")
+        print("[R] Refresh Data   [O] Open Position   [C] Close Position   [F] Scan Funding Rates   [Q] Quit")
 
 
+
+async def check_available_pairs():
+    """CLI function to check available pairs that have both spot and perp markets."""
+    print(Fore.CYAN + "Checking available delta-neutral pairs..." + Style.RESET_ALL)
+
+    api_manager = AsterApiManager(
+        api_user=os.getenv('API_USER'),
+        api_signer=os.getenv('API_SIGNER'),
+        api_private_key=os.getenv('API_PRIVATE_KEY'),
+        apiv1_public=os.getenv('APIV1_PUBLIC_KEY'),
+        apiv1_private=os.getenv('APIV1_PRIVATE_KEY')
+    )
+
+    try:
+        # Discover pairs available in both spot and perp markets
+        spot_symbols = await api_manager.get_available_spot_symbols()
+        perp_symbols = await api_manager.get_available_perp_symbols()
+
+        if not spot_symbols or not perp_symbols:
+            print(Fore.RED + "ERROR: Could not retrieve symbol lists from one or both markets." + Style.RESET_ALL)
+            return
+
+        # Find intersection
+        available_pairs = sorted(list(set(spot_symbols) & set(perp_symbols)))
+
+        if not available_pairs:
+            print(Fore.YELLOW + "No symbols are currently available in both spot and perpetual markets." + Style.RESET_ALL)
+            return
+
+        print(Fore.GREEN + f"\nFound {len(available_pairs)} pairs available for delta-neutral trading:\n" + Style.RESET_ALL)
+
+        # Display in columns for better readability
+        pairs_per_row = 4
+        for i in range(0, len(available_pairs), pairs_per_row):
+            row_pairs = available_pairs[i:i+pairs_per_row]
+            formatted_pairs = [f"{pair:<12}" for pair in row_pairs]
+            print("  " + "".join(formatted_pairs))
+
+        print(f"\n{Fore.CYAN}Total: {len(available_pairs)} pairs{Style.RESET_ALL}")
+
+    except Exception as e:
+        print(Fore.RED + f"ERROR: Failed to check available pairs: {e}" + Style.RESET_ALL)
+    finally:
+        await api_manager.close()
+
+async def check_current_positions():
+    """CLI function to show current delta-neutral positions."""
+    print(Fore.CYAN + "Analyzing current positions..." + Style.RESET_ALL)
+
+    api_manager = AsterApiManager(
+        api_user=os.getenv('API_USER'),
+        api_signer=os.getenv('API_SIGNER'),
+        api_private_key=os.getenv('API_PRIVATE_KEY'),
+        apiv1_public=os.getenv('APIV1_PUBLIC_KEY'),
+        apiv1_private=os.getenv('APIV1_PRIVATE_KEY')
+    )
+
+    try:
+        # Analyze current positions using the same logic as the dashboard
+        print("Fetching position data from both spot and perpetual markets...")
+
+        # Get position analysis and account data concurrently
+        results = await asyncio.gather(
+            api_manager.analyze_current_positions(),
+            api_manager.get_spot_account_balances(),
+            api_manager.get_perp_account_info(),
+            return_exceptions=True
+        )
+
+        analysis_results = results[0] if isinstance(results[0], dict) else {}
+        spot_balances = results[1] if isinstance(results[1], list) else []
+        perp_account_info = results[2] if isinstance(results[2], dict) else {}
+
+        if not analysis_results:
+            print(Fore.YELLOW + "No position analysis data available." + Style.RESET_ALL)
+            return
+
+        # Process positions into delta-neutral and other categories
+        all_positions = list(analysis_results.values())
+        delta_neutral_positions = [p for p in all_positions if p.get('is_delta_neutral')]
+        other_positions = [p for p in all_positions if not p.get('is_delta_neutral')]
+
+        # Fetch current funding rates for delta-neutral positions
+        if delta_neutral_positions:
+            print(f"Fetching current funding rates for {len(delta_neutral_positions)} delta-neutral positions...")
+            rate_tasks = [api_manager.get_funding_rate_history(p['symbol'], limit=1) for p in delta_neutral_positions]
+            rate_results = await asyncio.gather(*rate_tasks, return_exceptions=True)
+
+            for i, pos in enumerate(delta_neutral_positions):
+                rate_data = rate_results[i]
+                if not isinstance(rate_data, Exception) and rate_data:
+                    latest_rate = float(rate_data[0].get('fundingRate', 0))
+                    pos['current_apr'] = latest_rate * 3 * 365 * 100
+                else:
+                    pos['current_apr'] = 'N/A'
+
+        # Calculate portfolio totals
+        spot_usdt_balance = next((float(b.get('free', 0)) for b in spot_balances if b.get('asset') == 'USDT'), 0.0)
+
+        # Extract perpetual balances
+        assets = perp_account_info.get('assets', [])
+        perp_usdt = next((float(a.get('walletBalance', 0)) for a in assets if a.get('asset') == 'USDT'), 0.0)
+        perp_usdc = next((float(a.get('walletBalance', 0)) for a in assets if a.get('asset') == 'USDC'), 0.0)
+        perp_usdf = next((float(a.get('walletBalance', 0)) for a in assets if a.get('asset') == 'USDF'), 0.0)
+
+        # Display portfolio summary using common function
+        print(Fore.GREEN + f"\n{'='*70}")
+        print("PORTFOLIO SUMMARY")
+        print(f"{'='*70}" + Style.RESET_ALL)
+        render_portfolio_summary(perp_usdt, perp_usdc, perp_usdf, spot_usdt_balance, title="", indent="")
+
+        # Display delta-neutral positions using common function
+        print(Fore.GREEN + f"\n{'='*70}")
+        print(f"DELTA-NEUTRAL POSITIONS ({len(delta_neutral_positions)} found)" if delta_neutral_positions else "DELTA-NEUTRAL POSITIONS")
+        print(f"{'='*70}" + Style.RESET_ALL)
+
+        if delta_neutral_positions:
+            render_delta_neutral_positions(all_positions, title="", indent="")
+        else:
+            print("No delta-neutral positions found.")
+            print("Use 'python delta_neutral_bot.py --pairs' to see available pairs for opening positions.")
+
+        # Display other positions (imbalanced or spot-only)
+        if other_positions:
+            print(Fore.GREEN + f"\n{'='*70}")
+            print(f"OTHER HOLDINGS ({len(other_positions)} found)")
+            print(f"{'='*70}" + Style.RESET_ALL)
+
+            # Header
+            header = f"{'Symbol':<12} {'Spot Bal':>12} {'Perp Pos':>12} {'Net Delta':>12} {'Net Value USD':>15} {'Imbal%':>8}"
+            print(header)
+            print("-" * len(header))
+
+            total_other_value = 0
+            for pos in other_positions:
+                symbol = pos.get('symbol', 'N/A')
+                spot_balance = pos.get('spot_balance', 0.0)
+                perp_position = pos.get('perp_position', 0.0)
+                net_delta = pos.get('net_delta', 0.0)
+                value_usd = pos.get('position_value_usd', 0.0)
+                imbalance = pos.get('imbalance_pct', 0.0)
+
+                total_other_value += value_usd
+
+                print(Fore.YELLOW + f"{symbol:<12} {spot_balance:>12.6f} {perp_position:>12.6f} {net_delta:>12.6f} {value_usd:>15,.2f} {imbalance:>7.2f}" + Style.RESET_ALL)
+
+            print(f"\nTotal Other Holdings Value: ${total_other_value:,.2f}")
+
+        # Summary
+        print(Fore.GREEN + f"\n{'='*70}")
+        print("SUMMARY")
+        print(f"{'='*70}" + Style.RESET_ALL)
+        print(f"Delta-Neutral Positions: {len(delta_neutral_positions)}")
+        print(f"Other Holdings:          {len(other_positions)}")
+        print(f"Total Positions:         {len(all_positions)}")
+
+        if delta_neutral_positions:
+            avg_imbalance = sum(abs(p.get('imbalance_pct', 0)) for p in delta_neutral_positions) / len(delta_neutral_positions)
+            print(f"Average Imbalance:       {avg_imbalance:.2f}%")
+
+            # Count positions with good balance (<=5% imbalance)
+            well_balanced = sum(1 for p in delta_neutral_positions if abs(p.get('imbalance_pct', 0)) <= 5.0)
+            print(f"Well-Balanced Positions: {well_balanced}/{len(delta_neutral_positions)}")
+
+    except Exception as e:
+        print(Fore.RED + f"ERROR: Failed to analyze positions: {e}" + Style.RESET_ALL)
+    finally:
+        await api_manager.close()
+
+async def check_spot_assets():
+    """CLI function to show current spot asset balances."""
+    print(Fore.CYAN + "Fetching spot asset balances..." + Style.RESET_ALL)
+
+    api_manager = AsterApiManager(
+        api_user=os.getenv('API_USER'),
+        api_signer=os.getenv('API_SIGNER'),
+        api_private_key=os.getenv('API_PRIVATE_KEY'),
+        apiv1_public=os.getenv('APIV1_PUBLIC_KEY'),
+        apiv1_private=os.getenv('APIV1_PRIVATE_KEY')
+    )
+
+    try:
+        # Fetch spot account balances
+        print("Fetching spot balances from Aster DEX...")
+        spot_balances = await api_manager.get_spot_account_balances()
+
+        if not spot_balances:
+            print(Fore.YELLOW + "No spot balance data available." + Style.RESET_ALL)
+            return
+
+        # Filter out zero balances and sort by asset name
+        significant_balances = [
+            b for b in spot_balances
+            if float(b.get('free', 0)) > 0 or float(b.get('locked', 0)) > 0
+        ]
+        significant_balances.sort(key=lambda x: x.get('asset', ''))
+
+        if not significant_balances:
+            print(Fore.YELLOW + "No assets with significant balances found." + Style.RESET_ALL)
+            return
+
+        # Separate stablecoins from other assets
+        stablecoins = {'USDT', 'USDC', 'USDF', 'BUSD', 'DAI'}
+        stable_balances = [b for b in significant_balances if b.get('asset') in stablecoins]
+        non_stable_balances = [b for b in significant_balances if b.get('asset') not in stablecoins]
+
+        # Fetch USD prices for non-stablecoin assets
+        total_usd_value = 0
+        if non_stable_balances:
+            print(f"Fetching current prices for {len(non_stable_balances)} non-stablecoin assets...")
+            print("(Trying multiple quote currencies - some API errors are expected during price discovery)")
+            price_tasks = []
+            for balance in non_stable_balances:
+                asset = balance.get('asset')
+                # Try multiple quote currencies to find active trading pairs
+                for quote in ['USDT', 'USDC', 'BUSD']:
+                    price_tasks.append(api_manager.get_spot_book_ticker(f"{asset}{quote}", suppress_errors=True))
+
+            price_results = await asyncio.gather(*price_tasks, return_exceptions=True)
+
+            # Process price results for each asset
+            price_index = 0
+            for balance in non_stable_balances:
+                asset = balance.get('asset')
+                balance['price_usd'] = 0.0
+                balance['quote_currency'] = 'N/A'
+
+                # Check each quote currency until we find a valid price
+                for quote in ['USDT', 'USDC', 'BUSD']:
+                    price_result = price_results[price_index]
+                    price_index += 1
+
+                    if not isinstance(price_result, Exception) and price_result.get('bidPrice'):
+                        price = float(price_result['bidPrice'])
+                        if price > 0:
+                            balance['price_usd'] = price
+                            balance['quote_currency'] = quote
+                            break
+
+                # Calculate USD values
+                free_amount = float(balance.get('free', 0))
+                locked_amount = float(balance.get('locked', 0))
+                total_amount = free_amount + locked_amount
+
+                balance['free_value_usd'] = free_amount * balance['price_usd']
+                balance['locked_value_usd'] = locked_amount * balance['price_usd']
+                balance['total_value_usd'] = total_amount * balance['price_usd']
+
+        # Calculate totals for stablecoins (assume 1:1 USD)
+        for balance in stable_balances:
+            free_amount = float(balance.get('free', 0))
+            locked_amount = float(balance.get('locked', 0))
+
+            balance['price_usd'] = 1.0
+            balance['quote_currency'] = 'USD'
+            balance['free_value_usd'] = free_amount
+            balance['locked_value_usd'] = locked_amount
+            balance['total_value_usd'] = free_amount + locked_amount
+
+        # Display results
+        print(Fore.GREEN + f"\n{'='*80}")
+        print("SPOT ASSET BALANCES")
+        print(f"{'='*80}" + Style.RESET_ALL)
+
+        # Display stablecoins first
+        if stable_balances:
+            print(Fore.GREEN + f"\nSTABLECOINS ({len(stable_balances)} assets)" + Style.RESET_ALL)
+            header = f"{'Asset':<8} {'Free':>15} {'Locked':>15} {'Total':>15} {'Value USD':>15}"
+            print(header)
+            print("-" * len(header))
+
+            stable_total_value = 0
+            for balance in stable_balances:
+                asset = balance.get('asset', 'N/A')
+                free = float(balance.get('free', 0))
+                locked = float(balance.get('locked', 0))
+                total = free + locked
+                value_usd = balance['total_value_usd']
+                stable_total_value += value_usd
+
+                print(f"{asset:<8} {free:>15,.6f} {locked:>15,.6f} {total:>15,.6f} {value_usd:>15,.2f}")
+
+            print(f"\nStablecoin Total: ${stable_total_value:,.2f}")
+
+        # Display other assets
+        if non_stable_balances:
+            print(Fore.GREEN + f"\nOTHER ASSETS ({len(non_stable_balances)} assets)" + Style.RESET_ALL)
+            header = f"{'Asset':<8} {'Free':>12} {'Locked':>12} {'Total':>12} {'Price':>12} {'Quote':>6} {'Value USD':>15}"
+            print(header)
+            print("-" * len(header))
+
+            other_total_value = 0
+            for balance in non_stable_balances:
+                asset = balance.get('asset', 'N/A')
+                free = float(balance.get('free', 0))
+                locked = float(balance.get('locked', 0))
+                total = free + locked
+                price = balance['price_usd']
+                quote = balance['quote_currency']
+                value_usd = balance['total_value_usd']
+                other_total_value += value_usd
+
+                # Color code based on whether we have price data
+                color = Fore.CYAN if price > 0 else Fore.YELLOW
+                price_str = f"{price:,.4f}" if price > 0 else "N/A"
+
+                print(color + f"{asset:<8} {free:>12,.6f} {locked:>12,.6f} {total:>12,.6f} {price_str:>12} {quote:>6} {value_usd:>15,.2f}" + Style.RESET_ALL)
+
+            print(f"\nOther Assets Total: ${other_total_value:,.2f}")
+
+        # Grand total
+        grand_total = sum(b['total_value_usd'] for b in significant_balances)
+        print(Fore.GREEN + f"\n{'='*80}")
+        print("SUMMARY")
+        print(f"{'='*80}" + Style.RESET_ALL)
+        print(f"Total Assets:     {len(significant_balances)}")
+        print(f"Stablecoins:      {len(stable_balances)}")
+        print(f"Other Assets:     {len(non_stable_balances)}")
+        print(f"Total Value:      ${grand_total:,.2f}")
+
+        # Show assets without price data
+        no_price_assets = [b for b in non_stable_balances if b['price_usd'] == 0]
+        if no_price_assets:
+            print(f"\nAssets without price data: {len(no_price_assets)}")
+            for balance in no_price_assets:
+                asset = balance.get('asset')
+                total = float(balance.get('free', 0)) + float(balance.get('locked', 0))
+                print(f"  {asset}: {total:.6f}")
+
+    except Exception as e:
+        print(Fore.RED + f"ERROR: Failed to fetch spot assets: {e}" + Style.RESET_ALL)
+    finally:
+        await api_manager.close()
+
+async def check_perpetual_positions():
+    """CLI function to show current perpetual positions with detailed PnL analysis."""
+    print(Fore.CYAN + "Fetching perpetual positions..." + Style.RESET_ALL)
+
+    api_manager = AsterApiManager(
+        api_user=os.getenv('API_USER'),
+        api_signer=os.getenv('API_SIGNER'),
+        api_private_key=os.getenv('API_PRIVATE_KEY'),
+        apiv1_public=os.getenv('APIV1_PUBLIC_KEY'),
+        apiv1_private=os.getenv('APIV1_PRIVATE_KEY')
+    )
+
+    try:
+        # Fetch perpetual account info
+        print("Fetching perpetual account information and positions...")
+        perp_account_info = await api_manager.get_perp_account_info()
+
+        if not perp_account_info:
+            print(Fore.YELLOW + "No perpetual account data available." + Style.RESET_ALL)
+            return
+
+        # Extract positions with non-zero amounts
+        all_positions = perp_account_info.get('positions', [])
+        active_positions = [p for p in all_positions if float(p.get('positionAmt', 0)) != 0]
+
+        if not active_positions:
+            print(Fore.YELLOW + "No active perpetual positions found." + Style.RESET_ALL)
+            return
+
+        # Fetch current mark prices for all active positions
+        print(f"Fetching current market prices for {len(active_positions)} positions...")
+        price_tasks = [api_manager.get_perp_book_ticker(p['symbol']) for p in active_positions]
+        price_results = await asyncio.gather(*price_tasks, return_exceptions=True)
+
+        # Process positions and calculate PnL
+        for i, pos in enumerate(active_positions):
+            symbol = pos.get('symbol')
+            entry_price = float(pos.get('entryPrice', 0))
+            position_amt = float(pos.get('positionAmt', 0))
+            unrealized_pnl = float(pos.get('unrealizedProfit', 0))
+
+            # Get current mark price
+            price_data = price_results[i]
+            if not isinstance(price_data, Exception) and price_data.get('bidPrice') and price_data.get('askPrice'):
+                bid_price = float(price_data['bidPrice'])
+                ask_price = float(price_data['askPrice'])
+                mark_price = (bid_price + ask_price) / 2
+            else:
+                mark_price = entry_price  # Fallback to entry price if no current price
+
+            # Calculate PnL percentage
+            if entry_price > 0:
+                # For long positions: (mark_price - entry_price) / entry_price * 100
+                # For short positions: (entry_price - mark_price) / entry_price * 100
+                if position_amt > 0:  # Long position
+                    pnl_pct = ((mark_price - entry_price) / entry_price) * 100
+                else:  # Short position
+                    pnl_pct = ((entry_price - mark_price) / entry_price) * 100
+            else:
+                pnl_pct = 0.0
+
+            # Calculate notional value
+            notional_value = abs(position_amt) * mark_price
+
+            # Add calculated fields to position
+            pos['mark_price'] = mark_price
+            pos['pnl_pct'] = pnl_pct
+            pos['notional_value'] = notional_value
+            pos['leverage'] = float(pos.get('leverage', 1))
+
+        # Get account balance information
+        assets = perp_account_info.get('assets', [])
+        total_wallet_balance = sum(float(a.get('walletBalance', 0)) for a in assets)
+        total_unrealized_pnl = sum(float(p.get('unrealizedProfit', 0)) for p in active_positions)
+        total_margin_balance = total_wallet_balance + total_unrealized_pnl
+
+        # Display results
+        print(Fore.GREEN + f"\n{'='*95}")
+        print("PERPETUAL POSITIONS")
+        print(f"{'='*95}" + Style.RESET_ALL)
+
+        # Account summary
+        print(Fore.GREEN + f"\nACCOUNT SUMMARY" + Style.RESET_ALL)
+        print(f"Total Wallet Balance:    ${total_wallet_balance:>12,.2f}")
+        print(f"Total Unrealized PnL:    ${total_unrealized_pnl:>12,.2f}")
+        print(f"Total Margin Balance:    ${total_margin_balance:>12,.2f}")
+        print(f"Active Positions:        {len(active_positions):>12}")
+
+        # Use common function to render the positions table
+        render_perpetual_positions_table(active_positions, title="\nPOSITION DETAILS", show_summary=True)
+
+        # Additional CLI-specific metrics
+        print(Fore.GREEN + f"\nADDITIONAL METRICS" + Style.RESET_ALL)
+        total_notional = sum(pos.get('notional_value', 0) for pos in active_positions)
+        print(f"Total Notional Value:    ${total_notional:>12,.2f}")
+
+        if total_wallet_balance > 0:
+            account_pnl_pct = (total_unrealized_pnl / total_wallet_balance) * 100
+            print(f"Account PnL %:           {account_pnl_pct:>12.2f}%")
+
+            # Calculate effective leverage (total notional / margin balance)
+            if total_margin_balance > 0:
+                effective_leverage = total_notional / total_margin_balance
+                print(f"Effective Leverage:      {effective_leverage:>12.2f}x")
+
+        if active_positions:
+            avg_pnl_pct = sum(p['pnl_pct'] for p in active_positions) / len(active_positions)
+            print(f"Average PnL %:           {avg_pnl_pct:>12.2f}%")
+
+    except Exception as e:
+        print(Fore.RED + f"ERROR: Failed to fetch perpetual positions: {e}" + Style.RESET_ALL)
+    finally:
+        await api_manager.close()
+
+def render_funding_rates_table(funding_data, title="Funding Rates (sorted by APR, highest first)", show_summary=True, indent=""):
+    """Common function to render funding rates table with effective APR column.
+
+    Args:
+        funding_data: List of funding rate dictionaries with 'symbol', 'rate', 'apr' keys
+        title: Title to display above the table
+        show_summary: Whether to show summary statistics
+        indent: String to prepend to each line for indentation
+    """
+    if not funding_data:
+        print(Fore.YELLOW + f"{indent}No funding rate data available." + Style.RESET_ALL)
+        return
+
+    print(Fore.GREEN + f"{indent}{title}:\n" + Style.RESET_ALL)
+
+    # Display header
+    header = f"{'Symbol':<12} {'Current Rate':>15} {'Annualized APR (%)':>20} {'Effective APR (%)':>18}"
+    print(f"{indent}{header}")
+    print(f"{indent}" + "-" * len(header))
+
+    # Display funding rates
+    for item in funding_data:
+        rate = item['rate']
+        apr = item['apr']
+        effective_apr = apr / 2  # Divide by 2 since leverage is 1x for delta-neutral
+        apr_color = Fore.GREEN if apr > 0 else Fore.RED
+        effective_color = Fore.GREEN if effective_apr > 0 else Fore.RED
+        print(f"{indent}{item['symbol']:<12} {rate:>15.6f} {apr_color}{apr:>20.2f}{Style.RESET_ALL} {effective_color}{effective_apr:>18.2f}{Style.RESET_ALL}")
+
+    if show_summary:
+        # Summary statistics
+        positive_rates = [item for item in funding_data if item['apr'] > 0]
+        negative_rates = [item for item in funding_data if item['apr'] < 0]
+
+        print(f"\n{indent}{Fore.CYAN}Summary:")
+        print(f"{indent}  Positive APR pairs: {len(positive_rates)}")
+        print(f"{indent}  Negative APR pairs: {len(negative_rates)}")
+        if positive_rates:
+            highest_apr = max(positive_rates, key=lambda x: x['apr'])
+            highest_effective_apr = highest_apr['apr'] / 2
+            print(f"{indent}  Highest APR: {highest_apr['symbol']} ({highest_apr['apr']:.2f}% -> {highest_effective_apr:.2f}% effective)")
+        print(f"{indent}  Total pairs scanned: {len(funding_data)}{Style.RESET_ALL}")
+
+
+def render_perpetual_positions_table(positions_data, title="POSITION DETAILS", show_summary=True, indent=""):
+    """Common function to render perpetual positions table with % gain column.
+    Args:
+        positions_data: List of position dictionaries with calculated fields
+        title: Title to display above the table
+        show_summary: Whether to show summary statistics
+        indent: String to prepend to each line for indentation
+    """
+    if not positions_data:
+        print(Fore.YELLOW + f"{indent}No active perpetual positions found." + Style.RESET_ALL)
+        return
+
+    print(Fore.GREEN + f"{indent}{title}" + Style.RESET_ALL)
+
+    # Header with % gain column
+    header = f"{'Symbol':<12} {'Side':<5} {'Size':>12} {'Entry':>12} {'Mark':>12} {'Leverage':>8} {'Notional':>12} {'PnL USD':>12} {'PnL %':>8}"
+    print(f"{indent}{header}")
+    print(f"{indent}" + "-" * len(header))
+
+    # Sort positions by unrealized PnL (highest first)
+    sorted_positions = sorted(positions_data, key=lambda x: float(x.get('unrealizedProfit', 0)), reverse=True)
+
+    total_notional = 0
+    total_pnl = 0
+    profitable_positions = 0
+    losing_positions = 0
+
+    for pos in sorted_positions:
+        symbol = pos.get('symbol', 'N/A')
+        position_amt = float(pos.get('positionAmt', 0))
+        entry_price = float(pos.get('entryPrice', 0))
+        mark_price = pos.get('mark_price', entry_price)
+        leverage = pos.get('leverage', 1)
+        notional_value = pos.get('notional_value', 0)
+        unrealized_pnl = float(pos.get('unrealizedProfit', 0))
+        pnl_pct = pos.get('pnl_pct', 0)
+
+        total_notional += notional_value
+        total_pnl += unrealized_pnl
+
+        if unrealized_pnl > 0:
+            profitable_positions += 1
+        elif unrealized_pnl < 0:
+            losing_positions += 1
+
+        # Determine side and colors
+        if position_amt > 0:
+            side = "LONG"
+            side_color = Fore.GREEN
+        else:
+            side = "SHORT"
+            side_color = Fore.RED
+
+        size = abs(position_amt)
+
+        # Color coding based on PnL for the row
+        if unrealized_pnl > 0:
+            row_color = Fore.GREEN
+        elif unrealized_pnl < 0:
+            row_color = Fore.RED
+        else:
+            row_color = Fore.YELLOW
+
+        # Format the row with colored side text
+        print(f"{indent}{symbol:<12} {side_color}{side:<5}{Style.RESET_ALL} {row_color}{size:>12.6f} {entry_price:>12.4f} {mark_price:>12.4f} {leverage:>8.1f}x {notional_value:>12,.2f} {unrealized_pnl:>12.2f} {pnl_pct:>7.2f}%{Style.RESET_ALL}")
+
+    if show_summary:
+        # Summary statistics
+        print(f"\n{indent}{Fore.CYAN}Portfolio Summary:")
+        print(f"{indent}  Total Notional Value: ${total_notional:>12,.2f}")
+        print(f"{indent}  Total Unrealized PnL: ${total_pnl:>12,.2f}")
+        print(f"{indent}  Profitable Positions: {profitable_positions:>2}")
+        print(f"{indent}  Losing Positions:     {losing_positions:>2}")
+
+        if sorted_positions:
+            best_position = sorted_positions[0]
+            worst_position = sorted_positions[-1]
+            print(f"{indent}  Best Performer:  {best_position.get('symbol', 'N/A')} ({best_position.get('pnl_pct', 0):.2f}%)")
+            print(f"{indent}  Worst Performer: {worst_position.get('symbol', 'N/A')} ({worst_position.get('pnl_pct', 0):.2f}%)")
+        print(f"{indent}  Total Positions: {len(sorted_positions)}{Style.RESET_ALL}")
+
+
+def render_portfolio_summary(perp_usdt_balance, perp_usdc_balance, perp_usdf_balance, spot_usdt_balance, title="Portfolio Summary", indent=""):
+    """Common function to render portfolio summary section.
+    Args:
+        perp_usdt_balance: Perpetual USDT balance
+        perp_usdc_balance: Perpetual USDC balance
+        perp_usdf_balance: Perpetual USDF balance
+        spot_usdt_balance: Spot USDT balance
+        title: Title to display above the summary
+        indent: String to prepend to each line for indentation
+    """
+    print(Fore.GREEN + f"{indent}--- {title} ---" + Style.RESET_ALL)
+
+    perp_margin_balance = perp_usdt_balance + perp_usdc_balance + perp_usdf_balance
+    total_portfolio_value = perp_margin_balance + spot_usdt_balance
+
+    print(f"{indent}Perp Margin Balance: ${perp_margin_balance:,.2f} (USDT: {perp_usdt_balance:.2f}, USDC: {perp_usdc_balance:.2f}, USDF: {perp_usdf_balance:.2f})")
+    print(f"{indent}Spot USDT Balance:   ${spot_usdt_balance:,.2f}")
+    print(f"{indent}Total Portfolio USD: ${total_portfolio_value:,.2f}")
+
+
+def render_delta_neutral_positions(positions_data, title="Delta-Neutral Positions", indent=""):
+    """Common function to render delta-neutral positions table.
+    Args:
+        positions_data: List of position dictionaries with delta-neutral analysis
+        title: Title to display above the table
+        indent: String to prepend to each line for indentation
+    """
+    print(Fore.GREEN + f"{indent}--- {title} ---" + Style.RESET_ALL)
+
+    dn_positions = [p for p in positions_data if p.get('is_delta_neutral')]
+
+    if not dn_positions:
+        print(f"{indent}No delta-neutral positions found.")
+        return
+
+    header = f"{'Symbol':<12} {'Spot Balance':>15} {'Perp Position':>15} {'Net Delta':>12} {'Value (USD)':>15} {'Imbalance':>12} {'APR (%)':>10}"
+    print(f"{indent}{header}")
+    print(f"{indent}" + "-" * len(header))
+
+    total_dn_value = 0
+    for pos in dn_positions:
+        symbol = pos.get('symbol', 'N/A')
+        spot_balance = pos.get('spot_balance', 0.0)
+        perp_position = pos.get('perp_position', 0.0)
+        net_delta = pos.get('net_delta', 0.0)
+        value_usd = pos.get('position_value_usd', 0.0)
+        imbalance = pos.get('imbalance_pct', 0.0)
+        apr = pos.get('current_apr', 'N/A')
+        apr_str = f"{apr:.2f}" if isinstance(apr, (int, float)) else str(apr)
+
+        total_dn_value += value_usd
+
+        print(Fore.CYAN + f"{indent}{symbol:<12} {spot_balance:>15.6f} {perp_position:>15.6f} {net_delta:>12.6f} {value_usd:>15,.2f} {imbalance:>11.2f}% {apr_str:>10}" + Style.RESET_ALL)
+
+    print(f"{indent}{Fore.CYAN}Total Delta-Neutral Value: ${total_dn_value:,.2f}{Style.RESET_ALL}")
+
+
+def render_spot_balances(spot_balances, title="Spot Balances (Excluding Stables)", indent=""):
+    """Common function to render spot balances table.
+    Args:
+        spot_balances: List of spot balance dictionaries
+        title: Title to display above the table
+        indent: String to prepend to each line for indentation
+    """
+    print(Fore.GREEN + f"{indent}--- {title} ---" + Style.RESET_ALL)
+
+    non_stable_balances = [b for b in spot_balances if b.get('asset') not in ['USDT', 'USDC', 'USDF'] and float(b.get('free', 0)) + float(b.get('locked', 0)) > 0]
+
+    if not non_stable_balances:
+        print(f"{indent}No significant non-stablecoin spot balances found.")
+        return
+
+    header = f"{'Asset':<10} {'Free':>15} {'Locked':>15} {'Value (USD)':>18}"
+    print(f"{indent}{header}")
+    print(f"{indent}" + "-" * (len(header) + 4))
+
+    total_spot_value = 0
+    for balance in non_stable_balances:
+        asset = balance.get('asset', 'N/A')
+        free = float(balance.get('free', 0))
+        locked = float(balance.get('locked', 0))
+        value_usd = balance.get('value_usd', 0.0)
+        total_spot_value += value_usd
+        print(f"{indent}{asset:<10} {free:>15.6f} {locked:>15.6f} {value_usd:>18,.2f}")
+
+    print(f"{indent}{Fore.CYAN}Total Non-Stable Value: ${total_spot_value:,.2f}{Style.RESET_ALL}")
+
+
+def render_other_positions(positions_data, title="Other Holdings (Non-Delta-Neutral)", indent=""):
+    """Common function to render non-delta-neutral positions table.
+    Args:
+        positions_data: List of position dictionaries with delta-neutral analysis
+        title: Title to display above the table
+        indent: String to prepend to each line for indentation
+    """
+    other_positions = [p for p in positions_data if not p.get('is_delta_neutral')]
+
+    if not other_positions:
+        return  # Don't render if no other positions
+
+    print(Fore.GREEN + f"{indent}--- {title} ---" + Style.RESET_ALL)
+
+    header = f"{'Symbol':<12} {'Spot Balance':>15} {'Perp Position':>15} {'Net Delta':>12} {'Value (USD)':>15} {'Imbalance':>12}"
+    print(f"{indent}{header}")
+    print(f"{indent}" + "-" * len(header))
+
+    for pos in other_positions:
+        symbol = pos.get('symbol', 'N/A')
+        spot_balance = pos.get('spot_balance', 0.0)
+        perp_position = pos.get('perp_position', 0.0)
+        net_delta = pos.get('net_delta', 0.0)
+        value_usd = pos.get('position_value_usd', 0.0)
+        imbalance = pos.get('imbalance_pct', 0.0)
+
+        print(Fore.YELLOW + f"{indent}{symbol:<12} {spot_balance:>15.6f} {perp_position:>15.6f} {net_delta:>12.6f} {value_usd:>15,.2f} {imbalance:>11.2f}%" + Style.RESET_ALL)
+
+
+def render_opportunities(opportunities_data, title="Potential Opportunities", indent=""):
+    """Common function to render opportunities section.
+    Args:
+        opportunities_data: List of opportunity strings
+        title: Title to display above the opportunities
+        indent: String to prepend to each line for indentation
+    """
+    if not opportunities_data:
+        return  # Do not render the section if there are no opportunities
+
+    print(Fore.GREEN + f"{indent}--- {title} ---" + Style.RESET_ALL)
+    for opp in opportunities_data:
+        print(f"{indent}- {opp}")
+
+
+async def check_funding_rates():
+    """CLI function to check funding rates for all available pairs."""
+    print(Fore.CYAN + "Fetching funding rates for delta-neutral pairs..." + Style.RESET_ALL)
+
+    api_manager = AsterApiManager(
+        api_user=os.getenv('API_USER'),
+        api_signer=os.getenv('API_SIGNER'),
+        api_private_key=os.getenv('API_PRIVATE_KEY'),
+        apiv1_public=os.getenv('APIV1_PUBLIC_KEY'),
+        apiv1_private=os.getenv('APIV1_PRIVATE_KEY')
+    )
+
+    try:
+        # Discover pairs available in both spot and perp markets
+        spot_symbols = await api_manager.get_available_spot_symbols()
+        perp_symbols = await api_manager.get_available_perp_symbols()
+
+        if not spot_symbols or not perp_symbols:
+            print(Fore.RED + "ERROR: Could not retrieve symbol lists from one or both markets." + Style.RESET_ALL)
+            return
+
+        # Find intersection
+        symbols_to_scan = sorted(list(set(spot_symbols) & set(perp_symbols)))
+
+        if not symbols_to_scan:
+            print(Fore.YELLOW + "No symbols are currently available in both spot and perpetual markets." + Style.RESET_ALL)
+            return
+
+        print(f"Fetching funding rates for {len(symbols_to_scan)} pairs...")
+
+        # Fetch funding rates concurrently
+        rate_tasks = [api_manager.get_funding_rate_history(s, limit=1) for s in symbols_to_scan]
+        rate_results = await asyncio.gather(*rate_tasks, return_exceptions=True)
+
+        funding_data = []
+        for i, symbol in enumerate(symbols_to_scan):
+            rate_data = rate_results[i]
+            if not isinstance(rate_data, Exception) and rate_data:
+                rate = float(rate_data[0].get('fundingRate', 0))
+                apr = rate * 3 * 365 * 100
+                funding_data.append({'symbol': symbol, 'rate': rate, 'apr': apr})
+
+        # Sort by highest APR
+        funding_data.sort(key=lambda x: x['apr'], reverse=True)
+
+        if not funding_data:
+            print(Fore.YELLOW + "No funding rate data available." + Style.RESET_ALL)
+            return
+
+        # Use common function to render the table
+        render_funding_rates_table(funding_data)
+
+    except Exception as e:
+        print(Fore.RED + f"ERROR: Failed to fetch funding rates: {e}" + Style.RESET_ALL)
+    finally:
+        await api_manager.close()
 
 def main():
     """The main function to run the bot."""
     parser = argparse.ArgumentParser(description="Delta-Neutral Funding Rate Farming Bot")
     parser.add_argument('--test', action='store_true', help="Run in test mode (fetch, render once, then exit)")
+    parser.add_argument('--pairs', action='store_true', help="Check available pairs for delta-neutral trading")
+    parser.add_argument('--funding-rates', action='store_true', help="Check current funding rates for all available pairs")
+    parser.add_argument('--positions', action='store_true', help="Show current delta-neutral positions and portfolio summary")
+    parser.add_argument('--spot-assets', action='store_true', help="Show current spot asset balances with USD values")
+    parser.add_argument('--perpetual', action='store_true', help="Show current perpetual positions with PnL analysis")
     args = parser.parse_args()
 
     # Check for required environment variables
@@ -662,6 +1413,43 @@ def main():
         print("Please ensure API_USER, API_SIGNER, API_PRIVATE_KEY, APIV1_PUBLIC_KEY, and APIV1_PRIVATE_KEY are configured.")
         sys.exit(1)
 
+    # Handle CLI-only operations
+    if args.pairs:
+        try:
+            asyncio.run(check_available_pairs())
+        except KeyboardInterrupt:
+            print("\nOperation cancelled.")
+        return
+
+    if args.funding_rates:
+        try:
+            asyncio.run(check_funding_rates())
+        except KeyboardInterrupt:
+            print("\nOperation cancelled.")
+        return
+
+    if args.positions:
+        try:
+            asyncio.run(check_current_positions())
+        except KeyboardInterrupt:
+            print("\nOperation cancelled.")
+        return
+
+    if args.spot_assets:
+        try:
+            asyncio.run(check_spot_assets())
+        except KeyboardInterrupt:
+            print("\nOperation cancelled.")
+        return
+
+    if args.perpetual:
+        try:
+            asyncio.run(check_perpetual_positions())
+        except KeyboardInterrupt:
+            print("\nOperation cancelled.")
+        return
+
+    # Default behavior: run the dashboard
     app = DashboardApp(is_test_run=args.test)
     try:
         asyncio.run(app.run())

@@ -114,7 +114,7 @@ class AsterApiManager:
         query_string = urllib.parse.urlencode(params)
         return hmac.new(self.apiv1_private.encode('utf-8'), query_string.encode('utf-8'), hashlib.sha256).hexdigest()
 
-    async def _make_spot_request(self, method: str, path: str, params: dict = None, signed: bool = False) -> dict:
+    async def _make_spot_request(self, method: str, path: str, params: dict = None, signed: bool = False, suppress_errors: bool = False) -> dict:
         """Generic method for making requests to the Spot API."""
         if params is None:
             params = {}
@@ -132,7 +132,8 @@ class AsterApiManager:
         async with self.session.request(method, url, params=params, headers=headers) as response:
             if not response.ok:
                 error_body = await response.text()
-                print(f"API Error: {response.status}, Body: {error_body}")
+                if not suppress_errors:
+                    print(f"API Error: {response.status}, Body: {error_body}")
             response.raise_for_status()
             return await response.json()
 
@@ -169,9 +170,9 @@ class AsterApiManager:
             response.raise_for_status()
             return await response.json()
 
-    async def get_spot_book_ticker(self, symbol: str) -> dict:
+    async def get_spot_book_ticker(self, symbol: str, suppress_errors: bool = False) -> dict:
         """Get spot book ticker for a symbol."""
-        return await self._make_spot_request('GET', '/api/v1/ticker/bookTicker', params={'symbol': symbol})
+        return await self._make_spot_request('GET', '/api/v1/ticker/bookTicker', params={'symbol': symbol}, suppress_errors=suppress_errors)
 
     # --- Public Execution Methods (Write Actions) ---
 

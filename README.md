@@ -2,8 +2,6 @@
 
 This project is a terminal-based Python application for managing a delta-neutral funding rate farming strategy on the Aster DEX. The application's architecture is designed to be modular, testable, and secure, separating concerns into three main components.
 
-Referral link to support this work: https://www.asterdex.com/en/referral/164f81 . Earn 10% rebate on fees (I put maximum for you).
-
 ## Dashboard Preview
 
 ![Terminal Screenshot](terminal.png)
@@ -73,8 +71,76 @@ See also `.env.example.`
 Once your dependencies are installed and your `.env` file is configured, you can start the application by running the main script:
 
 ```bash
+# Run the interactive dashboard (default)
 python delta_neutral_bot.py
+
+# Or use CLI commands for specific tasks
+python delta_neutral_bot.py --help
 ```
+
+## CLI Commands
+
+The bot now includes comprehensive command-line interface (CLI) functionality for quick data access without starting the full interactive dashboard:
+
+### Available Commands
+
+```bash
+# Show help and all available options
+python delta_neutral_bot.py --help
+
+# Check available delta-neutral trading pairs
+python delta_neutral_bot.py --pairs
+
+# Show current funding rates with APR calculations
+python delta_neutral_bot.py --funding-rates
+
+# Show current delta-neutral positions and portfolio summary
+python delta_neutral_bot.py --positions
+
+# Show current spot asset balances with USD values
+python delta_neutral_bot.py --spot-assets
+
+# Show current perpetual positions with detailed PnL analysis
+python delta_neutral_bot.py --perpetual
+
+# Run dashboard in test mode (fetch once, then exit)
+python delta_neutral_bot.py --test
+```
+
+### CLI Features
+
+- **Concurrent API Calls**: Optimized performance with async/await patterns
+- **Cross-Platform**: Works on Windows, Linux, and macOS
+- **Colorized Output**: Enhanced readability with color-coded data
+- **Error Handling**: Graceful handling of API timeouts and errors
+- **Price Discovery**: Automatic USD value calculation across multiple quote currencies
+- **Performance Metrics**: Real-time PnL calculations in both USD and percentage
+- **Clean Session Management**: Proper cleanup and resource management
+
+## Recent Improvements
+
+### Enhanced Dashboard
+
+- **Compact Layout**: Optimized spacing for better information density
+- **Modular Rendering**: All dashboard sections use reusable common functions
+- **Real-time Data**: Live perpetual positions with percentage PnL tracking
+- **Funding Rate Analysis**: Effective APR calculations for 1x leverage strategies
+- **Portfolio Analytics**: Comprehensive position analysis with delta-neutral detection
+
+### Code Architecture Enhancements
+
+- **DRY Principle**: Eliminated code duplication with shared rendering functions
+- **Consistent Terminology**: Unified "perpetual" naming throughout the codebase
+- **Common Functions**: Reusable table rendering for both CLI and dashboard
+- **Error Handling**: Improved API error suppression during price discovery
+- **Cross-Platform**: Enhanced Windows compatibility with ASCII-only output
+
+### Testing & Quality
+
+- **Comprehensive Testing**: 45+ unit tests covering API manager and strategy logic
+- **Integration Tests**: Real API validation with automatic credential detection
+- **Demo Functionality**: Interactive demo script showcasing CLI capabilities
+- **Verification Scripts**: Automated validation of core functionality
 
 ### Method 2: Running with Docker (Recommended for Development)
 
