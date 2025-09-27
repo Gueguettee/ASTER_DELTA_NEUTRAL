@@ -87,7 +87,7 @@ The bot now includes comprehensive command-line interface (CLI) functionality fo
 ### Available Commands
 
 ```bash
-# Show help and all available options
+# Show all available options, including new health and balance commands
 python delta_neutral_bot.py --help
 
 # Check available delta-neutral trading pairs
@@ -105,6 +105,12 @@ python delta_neutral_bot.py --spot-assets
 # Show current perpetual positions with detailed PnL analysis
 python delta_neutral_bot.py --perpetual
 
+# Perform a comprehensive health check on all delta-neutral positions
+python delta_neutral_bot.py --health-check
+
+# Automatically rebalance USDT 50/50 between spot and perpetual accounts
+python delta_neutral_bot.py --rebalance
+
 # Run dashboard in test mode (fetch once, then exit)
 python delta_neutral_bot.py --test
 ```
@@ -121,28 +127,30 @@ python delta_neutral_bot.py --test
 
 ## Recent Improvements
 
-### Enhanced Dashboard
+### Enhanced Dashboard & CLI
 
-- **Compact Layout**: Optimized spacing for better information density
-- **Modular Rendering**: All dashboard sections use reusable common functions
-- **Real-time Data**: Live perpetual positions with percentage PnL tracking
-- **Funding Rate Analysis**: Effective APR calculations for 1x leverage strategies
-- **Portfolio Analytics**: Comprehensive position analysis with delta-neutral detection
+- **Health Check Workflow**: New interactive (`H` key) and CLI (`--health-check`) functionality to analyze position imbalance, PnL, and liquidation risk.
+- **USDT Rebalancing**: Interactive (`B` key) and CLI (`--rebalance`) tool to automatically balance USDT funds 50/50 between spot and perpetual accounts.
+- **Compact Layout**: Optimized spacing for better information density.
+- **Modular Rendering**: All dashboard and CLI sections use reusable common rendering functions.
+- **Real-time Data**: Live perpetual positions with percentage PnL tracking.
+- **Funding Rate Analysis**: Effective APR calculations for 1x leverage strategies.
+- **Portfolio Analytics**: Comprehensive position analysis with delta-neutral detection.
 
 ### Code Architecture Enhancements
 
-- **DRY Principle**: Eliminated code duplication with shared rendering functions
-- **Consistent Terminology**: Unified "perpetual" naming throughout the codebase
-- **Common Functions**: Reusable table rendering for both CLI and dashboard
-- **Error Handling**: Improved API error suppression during price discovery
-- **Cross-Platform**: Enhanced Windows compatibility with ASCII-only output
+- **Automated Precision Handling**: All order placement methods now automatically format price and quantity to meet exchange-specific precision requirements.
+- **Fund Transfer API**: Integrated methods to transfer assets between spot and perpetual wallets.
+- **Dynamic Pair Discovery**: The bot now dynamically discovers tradable pairs by checking for their existence in both spot and perpetual markets.
+- **DRY Principle**: Eliminated code duplication with shared rendering and analysis functions.
+- **Consistent Terminology**: Unified "perpetual" naming throughout the codebase.
+- **Error Handling**: Improved API error suppression during price discovery.
 
 ### Testing & Quality
 
-- **Comprehensive Testing**: 45+ unit tests covering API manager and strategy logic
-- **Integration Tests**: Real API validation with automatic credential detection
-- **Demo Functionality**: Interactive demo script showcasing CLI capabilities
-- **Verification Scripts**: Automated validation of core functionality
+- **Comprehensive Testing**: 45+ unit tests covering the API manager, strategy logic, and new CLI commands.
+- **Integration Tests**: Real API validation with automatic credential detection, including tests for live order placement and fund transfers.
+- **Verification Scripts**: Automated validation of core functionality.
 
 ### Method 2: Running with Docker (Recommended for Development)
 
