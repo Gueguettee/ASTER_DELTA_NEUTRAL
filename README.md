@@ -56,6 +56,10 @@ pip install -r requirements.txt
 
 #### 2. Configure Environment Variables
 
+You need to create both **API** and **Pro API** credentials on Aster Finance as shown below:
+
+![API Management](APIs.png)
+
 Create a `.env` file in the root directory of the project. This file will store your API credentials securely. Add your keys to the `.env` file as follows:
 
 ```
