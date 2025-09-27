@@ -217,7 +217,7 @@ class DeltaNeutralLogic:
         # For delta-neutral, perp capital should match spot capital value
         perp_capital_required = total_usd_capital / leverage
 
-        return {
+        result = {
             'spot_quantity_to_buy': spot_quantity_to_buy,
             'total_perp_quantity_to_short': total_perp_quantity_to_short,
             'new_spot_capital_required': new_spot_capital_required,
@@ -227,6 +227,12 @@ class DeltaNeutralLogic:
             'leverage_used': leverage,
             'is_proper_delta_neutral': leverage == 1
         }
+
+        # Add legacy aliases for backward compatibility with tests
+        result['spot_quantity'] = spot_quantity_to_buy
+        result['perp_quantity'] = total_perp_quantity_to_short
+
+        return result
 
     @staticmethod
     def check_position_health(
@@ -419,3 +425,99 @@ class DeltaNeutralLogic:
             errors.append(f"Insufficient perp balance: ${perp_balance_usdt:.2f} < ${min_capital_usd/2:.2f}")
 
         return len(errors) == 0, errors
+
+    @staticmethod
+    def analyze_position_data(
+        perp_positions: List[Dict[str, Any]],
+        spot_balances: Dict[str, float],
+        perp_symbol_map: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Analyze position data to identify delta-neutral positions and calculate metrics.
+
+        Args:
+            perp_positions: List of perpetual position dictionaries from API
+            spot_balances: Dict mapping asset -> spot balance quantity
+            perp_symbol_map: Dict mapping symbol -> exchange info for perpetuals
+
+        Returns:
+            Dict mapping symbol -> position analysis with delta-neutral metrics
+        """
+        analysis = {}
+
+        for position in perp_positions:
+            symbol = position.get('symbol', '')
+            perp_qty = float(position.get('positionAmt', '0'))
+            if not symbol or abs(perp_qty) < 1e-9:
+                continue
+
+            base_asset = perp_symbol_map.get(symbol, {}).get('baseAsset', '')
+            spot_qty = spot_balances.get(base_asset, 0.0)
+
+            net_delta = spot_qty + perp_qty  # perp_qty is negative for short
+            total_size = max(abs(spot_qty), abs(perp_qty))
+            imbalance_pct = abs(net_delta) / total_size * 100 if total_size > 0 else 0.0
+            is_delta_neutral = imbalance_pct <= 2.0  # 2% threshold for delta-neutral classification
+
+            mark_price = float(position.get('markPrice', '0'))
+            position_value_usd = abs(perp_qty) * mark_price
+
+            analysis[symbol] = {
+                'symbol': symbol,
+                'spot_balance': spot_qty,
+                'perp_position': perp_qty,
+                'is_delta_neutral': is_delta_neutral,
+                'imbalance_pct': imbalance_pct,
+                'net_delta': net_delta,
+                'position_value_usd': position_value_usd,
+                'leverage': int(float(position.get('leverage', '1'))),
+            }
+
+        return analysis
+
+    @staticmethod
+    def perform_portfolio_health_analysis(
+        positions_data: List[Dict[str, Any]]
+    ) -> Tuple[List[str], List[str], int]:
+        """
+        Analyze portfolio health and identify issues with delta-neutral positions.
+
+        Args:
+            positions_data: List of position dictionaries from analyze_position_data
+
+        Returns:
+            Tuple of (health_issues, critical_issues, dn_positions_count)
+        """
+        # Filter for delta-neutral positions
+        dn_positions = [p for p in positions_data if p.get('is_delta_neutral')]
+        dn_positions_count = len(dn_positions)
+
+        if dn_positions_count == 0:
+            return [], [], 0
+
+        health_issues = []
+        critical_issues = []
+
+        # Check each delta-neutral position
+        for pos in dn_positions:
+            symbol = pos.get('symbol', 'N/A')
+            imbalance_pct = pos.get('imbalance_pct', 0.0)
+            leverage = pos.get('leverage', 1)
+            position_value_usd = pos.get('position_value_usd', 0.0)
+
+            # Check for leverage issues (critical for delta-neutral strategy)
+            if leverage != 1:
+                critical_issues.append(f"{symbol}: Leverage is {leverage}x (should be 1x for delta-neutral)")
+
+            # Check for significant imbalance
+            if imbalance_pct > IMBALANCE_THRESHOLD_PCT:
+                if imbalance_pct > 10.0:  # Critical threshold
+                    critical_issues.append(f"{symbol}: Critical imbalance {imbalance_pct:.1f}% (>10%)")
+                else:
+                    health_issues.append(f"{symbol}: Position imbalance {imbalance_pct:.1f}% (target: <{IMBALANCE_THRESHOLD_PCT}%)")
+
+            # Check for very small positions (might indicate incomplete trades)
+            if position_value_usd < 5.0:
+                health_issues.append(f"{symbol}: Very small position value ${position_value_usd:.2f}")
+
+        return health_issues, critical_issues, dn_positions_count

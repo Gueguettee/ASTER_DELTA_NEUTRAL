@@ -47,6 +47,7 @@ class DashboardApp:
         self.running = True
         self.refresh_interval = 30  # seconds
         self.is_test_run = is_test_run
+        self.interactive_mode = False  # Flag to pause auto-refresh during user interactions
 
         # State variables to hold dashboard data
         self.last_updated = "Never"
@@ -102,7 +103,11 @@ class DashboardApp:
         # The first fetch is already done by run(), so we start with a sleep.
         while self.running:
             await asyncio.sleep(self.refresh_interval)
-            
+
+            # Skip refresh if in interactive mode (user is in a workflow)
+            if self.interactive_mode:
+                continue
+
             try:
                 await self._fetch_and_update_data()
                 self._render_dashboard()
@@ -217,11 +222,24 @@ class DashboardApp:
                     latest_rate = float(rate_data[0].get('fundingRate', 0))
                     pos['current_apr'] = latest_rate * 3 * 365 * 100
 
+        # Fetch available opportunities for new positions
+        try:
+            all_opportunities = await self.api_manager.discover_delta_neutral_pairs()
+            existing_dn_symbols = {p.get('symbol') for p in self.positions if p.get('is_delta_neutral')}
+            self.opportunities = [opp for opp in all_opportunities if opp not in existing_dn_symbols]
+        except Exception as e:
+            self._add_log(f"Could not fetch opportunities: {e}")
+            self.opportunities = []
+
         self.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._add_log("Data refresh complete.")
 
     def _render_dashboard(self):
         """Clears the screen and renders the entire dashboard UI."""
+        # Skip rendering if in interactive mode to avoid clearing user prompts
+        if self.interactive_mode:
+            return
+
         os.system('cls' if os.name == 'nt' else 'clear')
         print(Style.BRIGHT + Fore.CYAN + "=" * 80)
         print(" ASTER DELTA-NEUTRAL FUNDING RATE FARMING BOT ".center(80))
@@ -286,11 +304,30 @@ class DashboardApp:
                 await self._fetch_and_update_data()
                 self._render_dashboard()
             elif command == 'o':
+                self.interactive_mode = True
                 await self._open_position_workflow()
+                self.interactive_mode = False
+                self._render_dashboard()
             elif command == 'c':
+                self.interactive_mode = True
                 await self._close_position_workflow()
+                self.interactive_mode = False
+                self._render_dashboard()
             elif command == 'f':
+                self.interactive_mode = True
                 await self._show_funding_rates_workflow()
+                self.interactive_mode = False
+                self._render_dashboard()
+            elif command == 'h':
+                self.interactive_mode = True
+                await self._perform_health_check()
+                self.interactive_mode = False
+                self._render_dashboard()
+            elif command == 'b':
+                self.interactive_mode = True
+                await self._rebalance_usdt_workflow()
+                self.interactive_mode = False
+                self._render_dashboard()
 
     def _add_log(self, message: str):
         """Adds a timestamped message to the log queue."""
@@ -312,18 +349,17 @@ class DashboardApp:
 
         if not self.opportunities:
             self._add_log(f"{Fore.YELLOW}No new opportunities available to open a position.{Style.RESET_ALL}")
-            self._render_dashboard()
             return
-        
+
         self._add_log(f"Fetching data for {len(self.opportunities)} opportunities...")
         tasks = []
         for opp in self.opportunities:
             tasks.append(self.api_manager.get_spot_book_ticker(opp))
             tasks.append(self.api_manager.get_perp_symbol_filter(opp, 'MIN_NOTIONAL'))
             tasks.append(self.api_manager.get_perp_symbol_filter(opp, 'LOT_SIZE'))
-        
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         opportunity_data = {}
         for i, opp in enumerate(self.opportunities):
             price_res, min_notional_res, lot_size_res = results[i*3], results[i*3 + 1], results[i*3 + 2]
@@ -333,8 +369,6 @@ class DashboardApp:
                     'min_notional_filter': min_notional_res if not isinstance(min_notional_res, Exception) else None,
                     'lot_size_filter': lot_size_res if not isinstance(lot_size_res, Exception) else None
                 }
-
-        self._render_dashboard()
 
         try:
             # 2. Ask user to select a symbol
@@ -409,12 +443,15 @@ class DashboardApp:
             await self.api_manager.place_perp_market_order(symbol=selected_symbol, quantity=str(sizing['total_perp_quantity_to_short']), side='SELL')
             self._add_log(f"{Fore.GREEN}Successfully opened position for {selected_symbol}.{Style.RESET_ALL}")
 
+            # Wait 1 second then refresh data to show the new position
+            self._add_log("Refreshing data to show new position...")
+            await asyncio.sleep(1)
+            await self._fetch_and_update_data()
+
         except (ValueError, IndexError):
             self._add_log(f"{Fore.RED}Invalid selection.{Style.RESET_ALL}")
         except KeyboardInterrupt:
             self._add_log("Operation cancelled by user.")
-        finally:
-            self._render_dashboard()
 
     async def _close_position_workflow(self):
         """Guides the user through closing an existing delta-neutral position."""
@@ -423,7 +460,6 @@ class DashboardApp:
 
         if not dn_positions:
             self._add_log(f"{Fore.YELLOW}No delta-neutral positions available to close.{Style.RESET_ALL}")
-            self._render_dashboard()
             return
 
         try:
@@ -453,17 +489,20 @@ class DashboardApp:
             self._add_log(f"Closing position for {symbol_to_close}...")
             perp_quantity = abs(selected_position.get('perp_position', 0))
             side_to_close = 'BUY' if selected_position.get('perp_position', 0) < 0 else 'SELL'
-            
+
             await self.api_manager.close_perp_position(symbol=symbol_to_close, quantity=str(perp_quantity), side_to_close=side_to_close)
             await self.api_manager.place_spot_sell_market_order(symbol=symbol_to_close, base_quantity=str(selected_position.get('spot_balance', 0)))
             self._add_log(f"{Fore.GREEN}Successfully closed position for {symbol_to_close}.{Style.RESET_ALL}")
+
+            # Wait 1 second then refresh data to show the closed position
+            self._add_log("Refreshing data to show position closure...")
+            await asyncio.sleep(1)
+            await self._fetch_and_update_data()
 
         except (ValueError, IndexError):
             self._add_log(f"{Fore.RED}Invalid selection.{Style.RESET_ALL}")
         except KeyboardInterrupt:
             self._add_log("Operation cancelled by user.")
-        finally:
-            self._render_dashboard()
 
     async def _show_funding_rates_workflow(self):
         """Fetches and displays funding rates for top perpetual contracts."""
@@ -502,10 +541,161 @@ class DashboardApp:
             self.funding_rate_cache = sorted(funding_data, key=lambda x: x['apr'], reverse=True)
             self._add_log("Funding rate scan complete.")
 
+            # Display the results to the user
+            if self.funding_rate_cache:
+                print(f"\n{Fore.GREEN}=== FUNDING RATES SCAN RESULTS ==={Style.RESET_ALL}")
+                render_funding_rates_table(self.funding_rate_cache)
+                print(f"\n{Fore.CYAN}Press Enter to return to dashboard...{Style.RESET_ALL}")
+                await self._get_user_input("")
+            else:
+                print(f"\n{Fore.YELLOW}No funding rate data available.{Style.RESET_ALL}")
+                print(f"\n{Fore.CYAN}Press Enter to return to dashboard...{Style.RESET_ALL}")
+                await self._get_user_input("")
+
         except Exception as e:
             self._add_log(f"{Fore.RED}Error during funding rate scan: {e}{Style.RESET_ALL}")
-        
-        self._render_dashboard() # Re-render to show the new data
+            print(f"\n{Fore.CYAN}Press Enter to return to dashboard...{Style.RESET_ALL}")
+            await self._get_user_input("")
+
+    async def _rebalance_usdt_workflow(self):
+        """Guides the user through rebalancing USDT between spot and perpetual accounts."""
+        self._add_log("Starting USDT rebalance workflow...")
+
+        try:
+            # Get current balances and calculate rebalance need
+            self._add_log("Analyzing current USDT distribution...")
+            result = await self.api_manager.rebalance_usdt_50_50()
+
+            # Display current state
+            print("\n" + Fore.CYAN + "=== USDT BALANCE ANALYSIS ===" + Style.RESET_ALL)
+            print(f"Current Spot USDT:     ${result['current_spot_usdt']:>10.2f}")
+            print(f"Current Perp USDT:     ${result['current_perp_usdt']:>10.2f}")
+            print(f"Total Available USDT:  ${result['total_usdt']:>10.2f}")
+            print(f"Target Each (50/50):   ${result['target_each']:>10.2f}")
+
+            if not result['transfer_needed']:
+                print(Fore.GREEN + "\n✓ ALREADY BALANCED: Your USDT is already distributed 50/50 (within $1)" + Style.RESET_ALL)
+                print(f"\n{Fore.CYAN}Press Enter to return to dashboard...{Style.RESET_ALL}")
+                await self._get_user_input("")
+                return
+
+            # Show transfer details
+            print(f"\nTransfer Required:")
+            print(f"  Amount:     ${result['transfer_amount']:.2f}")
+            print(f"  Direction:  {result['transfer_direction'].replace('_', ' → ')}")
+
+            if result['transfer_direction'] == 'SPOT_TO_PERP':
+                print(f"  Action:     Move ${result['transfer_amount']:.2f} from Spot to Perpetual")
+            else:
+                print(f"  Action:     Move ${result['transfer_amount']:.2f} from Perpetual to Spot")
+
+            # Ask for confirmation
+            print("\n" + Fore.YELLOW + "--- CONFIRMATION ---" + Style.RESET_ALL)
+            print(f"Execute USDT rebalance transfer?")
+            print(f"This will move ${result['transfer_amount']:.2f} USDT between your accounts.")
+
+            confirm = await self._get_user_input("Press Enter to confirm transfer (or 'x' to cancel): ")
+            if confirm.strip().lower() == 'x' or confirm.strip() != '':
+                self._add_log("USDT rebalance cancelled by user.")
+                return
+
+            # Execute the rebalance (which includes the transfer)
+            self._add_log("Executing USDT rebalance transfer...")
+            final_result = await self.api_manager.rebalance_usdt_50_50()
+
+            if final_result.get('transfer_result'):
+                transfer_result = final_result['transfer_result']
+                if transfer_result.get('status') == 'SUCCESS':
+                    self._add_log(f"{Fore.GREEN}USDT rebalance completed successfully!{Style.RESET_ALL}")
+                    print(f"\n{Fore.GREEN}✓ TRANSFER SUCCESSFUL{Style.RESET_ALL}")
+                    print(f"Transaction ID: {transfer_result.get('tranId')}")
+                    print(f"Status: {transfer_result.get('status')}")
+                else:
+                    self._add_log(f"{Fore.RED}Transfer failed: {transfer_result}{Style.RESET_ALL}")
+            else:
+                self._add_log(f"{Fore.RED}No transfer result received{Style.RESET_ALL}")
+
+            # Wait 1 second then refresh data to show the new balances
+            self._add_log("Refreshing data to show updated balances...")
+            await asyncio.sleep(1)
+            await self._fetch_and_update_data()
+
+            print(f"\n{Fore.CYAN}Rebalance complete. Press Enter to return to dashboard...{Style.RESET_ALL}")
+            await self._get_user_input("")
+
+        except (ValueError, KeyError) as e:
+            self._add_log(f"{Fore.RED}Rebalance error: {e}{Style.RESET_ALL}")
+            print(f"\n{Fore.CYAN}Press Enter to return to dashboard...{Style.RESET_ALL}")
+            await self._get_user_input("")
+        except KeyboardInterrupt:
+            self._add_log("USDT rebalance cancelled by user.")
+            print(f"\n{Fore.CYAN}Press Enter to return to dashboard...{Style.RESET_ALL}")
+            await self._get_user_input("")
+        except Exception as e:
+            self._add_log(f"{Fore.RED}Unexpected error during rebalance: {e}{Style.RESET_ALL}")
+            print(f"\n{Fore.CYAN}Press Enter to return to dashboard...{Style.RESET_ALL}")
+            await self._get_user_input("")
+
+    async def _perform_health_check(self):
+        """Performs a health check on all positions and displays warnings."""
+        self._add_log("Performing portfolio health check...")
+
+        try:
+            # Use shared health check logic
+            health_issues, critical_issues, dn_positions_count, position_pnl_data = await perform_health_check_analysis(self.api_manager)
+
+            if dn_positions_count == 0:
+                self._add_log(f"{Fore.YELLOW}No delta-neutral positions found to check.{Style.RESET_ALL}")
+                return
+
+            # Display health check results
+            print("\n" + Fore.CYAN + "=== PORTFOLIO HEALTH CHECK ===" + Style.RESET_ALL)
+
+            if critical_issues:
+                print(Fore.RED + "\nCRITICAL ISSUES:" + Style.RESET_ALL)
+                for issue in critical_issues:
+                    print(Fore.RED + f"  {issue}" + Style.RESET_ALL)
+
+            if health_issues:
+                print(Fore.YELLOW + "\nWARNINGS:" + Style.RESET_ALL)
+                for issue in health_issues:
+                    print(Fore.YELLOW + f"  {issue}" + Style.RESET_ALL)
+
+            # Display position PnL summary
+            if position_pnl_data:
+                print(Fore.CYAN + "\nPOSITION PnL SUMMARY:" + Style.RESET_ALL)
+                header = f"{'Symbol':<12} {'Value (USD)':<12} {'Imbalance':<10} {'PnL %':<10}"
+                print(header)
+                print("-" * len(header))
+
+                for pos_data in position_pnl_data:
+                    symbol = pos_data['symbol']
+                    value_usd = pos_data['position_value_usd']
+                    imbalance_pct = pos_data['imbalance_pct']
+                    pnl_pct = pos_data['pnl_pct']
+
+                    # Color code PnL based on performance
+                    if pnl_pct is not None:
+                        if pnl_pct >= -25:  # Good PnL (above -25%)
+                            pnl_color = Fore.GREEN
+                            pnl_str = f"{pnl_pct:+.2f}%"
+                        else:  # Bad PnL (below -25%, already in warnings/critical)
+                            pnl_color = Fore.RED
+                            pnl_str = f"{pnl_pct:+.2f}%"
+                    else:
+                        pnl_color = Fore.YELLOW
+                        pnl_str = "N/A"
+
+                    print(f"{symbol:<12} ${value_usd:<11.2f} {imbalance_pct:<9.2f}% {pnl_color}{pnl_str:<10}{Style.RESET_ALL}")
+
+            if not critical_issues and not health_issues:
+                print(Fore.GREEN + "\nALL CLEAR: No health issues detected with your positions." + Style.RESET_ALL)
+
+            print(f"\n{Fore.CYAN}Health check complete. Press Enter to return to dashboard...{Style.RESET_ALL}")
+            await self._get_user_input("")
+
+        except Exception as e:
+            self._add_log(f"{Fore.RED}Error during health check: {e}{Style.RESET_ALL}")
 
     def _render_portfolio_summary(self):
         """Renders the summary of portfolio balances."""
@@ -630,6 +820,7 @@ class DashboardApp:
         """Renders the main menu of available actions."""
         print(Fore.CYAN + "\n--- Menu ---" + Style.RESET_ALL)
         print("[R] Refresh Data   [O] Open Position   [C] Close Position   [F] Scan Funding Rates   [Q] Quit")
+        print("[H] Health Check   [B] Balance USDT (Perp/Spot)")
 
 
 
@@ -1096,7 +1287,7 @@ def render_funding_rates_table(funding_data, title="Funding Rates (sorted by APR
     print(Fore.GREEN + f"{indent}{title}:\n" + Style.RESET_ALL)
 
     # Display header
-    header = f"{'Symbol':<12} {'Current Rate':>15} {'Annualized APR (%)':>20} {'Effective APR (%)':>18}"
+    header = f"{'Symbol':<12} {'Current Rate':>15} {'APR (%)':>20} {'Effective APR (%)':>18}"
     print(f"{indent}{header}")
     print(f"{indent}" + "-" * len(header))
 
@@ -1241,7 +1432,7 @@ def render_delta_neutral_positions(positions_data, title="Delta-Neutral Position
         print(f"{indent}No delta-neutral positions found.")
         return
 
-    header = f"{'Symbol':<12} {'Spot Balance':>15} {'Perp Position':>15} {'Net Delta':>12} {'Value (USD)':>15} {'Imbalance':>12} {'APR (%)':>10}"
+    header = f"{'Symbol':<12} {'Spot Balance':>15} {'Perp Position':>15} {'Net Delta':>12} {'Value (USD)':>15} {'Imbalance':>12} {' Eff. APR (%)':>12}"
     print(f"{indent}{header}")
     print(f"{indent}" + "-" * len(header))
 
@@ -1254,7 +1445,7 @@ def render_delta_neutral_positions(positions_data, title="Delta-Neutral Position
         value_usd = pos.get('position_value_usd', 0.0)
         imbalance = pos.get('imbalance_pct', 0.0)
         apr = pos.get('current_apr', 'N/A')
-        apr_str = f"{apr:.2f}" if isinstance(apr, (int, float)) else str(apr)
+        apr_str = f"{apr/2.0:.2f}" if isinstance(apr, (int, float)) else str(apr)
 
         total_dn_value += value_usd
 
@@ -1338,6 +1529,93 @@ def render_opportunities(opportunities_data, title="Potential Opportunities", in
         print(f"{indent}- {opp}")
 
 
+async def perform_health_check_analysis(api_manager):
+    """
+    Shared health check logic that analyzes positions and returns health issues.
+    Returns: (health_issues, critical_issues, dn_positions_count, position_pnl_data)
+    """
+    # Fetch position analysis data
+    results = await asyncio.gather(
+        api_manager.analyze_current_positions(),
+        api_manager.get_perp_account_info(),
+        return_exceptions=True
+    )
+
+    analysis_results = results[0] if isinstance(results[0], dict) else {}
+    perp_account_info = results[1] if isinstance(results[1], dict) else {}
+
+    if not analysis_results:
+        return [], [], 0
+
+    # Process positions data into list format
+    all_positions = list(analysis_results.values())
+
+    # Use strategy logic for core health analysis
+    health_issues, critical_issues, dn_positions_count = DeltaNeutralLogic.perform_portfolio_health_analysis(all_positions)
+
+    # Add additional PnL and price-specific checks for delta-neutral positions
+    dn_positions = [p for p in all_positions if p.get('is_delta_neutral')]
+    raw_perp_positions = [p for p in perp_account_info.get('positions', []) if float(p.get('positionAmt', 0)) != 0]
+
+    # Fetch current prices for perpetual positions
+    if raw_perp_positions:
+        price_tasks = [api_manager.get_perp_book_ticker(p['symbol']) for p in raw_perp_positions]
+        price_results = await asyncio.gather(*price_tasks, return_exceptions=True)
+        for i, pos in enumerate(raw_perp_positions):
+            price_data = price_results[i]
+            if not isinstance(price_data, Exception) and price_data.get('bidPrice'):
+                pos['markPrice'] = (float(price_data['bidPrice']) + float(price_data['askPrice'])) / 2
+
+    # Add PnL and liquidity specific checks and collect position data
+    position_pnl_data = []
+
+    for pos in dn_positions:
+        symbol = pos.get('symbol', 'N/A')
+        spot_balance = pos.get('spot_balance', 0.0)
+
+        # Find corresponding raw perp position to get PnL data and price
+        perp_pos = next((p for p in raw_perp_positions if p.get('symbol') == symbol), None)
+        current_price = 0.0
+        pnl_pct = None
+        position_value_usd = pos.get('position_value_usd', 0.0)
+
+        if perp_pos:
+            entry_price = float(perp_pos.get('entryPrice', 0))
+            mark_price = perp_pos.get('markPrice', entry_price)
+            current_price = mark_price
+            position_amt = float(perp_pos.get('positionAmt', 0))
+
+            # Calculate PnL percentage for short position
+            if entry_price > 0 and position_amt < 0:  # Short position
+                pnl_pct = ((entry_price - mark_price) / entry_price) * 100
+
+                # Check for PnL warnings
+                if pnl_pct <= -50:
+                    critical_issues.append(f"CRITICAL: {symbol} short position PnL: {pnl_pct:.2f}% (below -50%)")
+                elif pnl_pct <= -25:
+                    health_issues.append(f"WARNING: {symbol} short position PnL: {pnl_pct:.2f}% (below -25%)")
+
+        # Calculate spot position value using current price
+        spot_value_usd = spot_balance * current_price
+
+        # Check spot position value for liquidity concerns
+        if spot_value_usd < 10:
+            if spot_value_usd < 5:
+                critical_issues.append(f"CRITICAL: {symbol} spot position value: ${spot_value_usd:.2f} (below $5 - impossible to close)")
+            else:
+                health_issues.append(f"WARNING: {symbol} spot position value: ${spot_value_usd:.2f} (below $10 - rebalancing advised)")
+
+        # Store position data for display
+        position_pnl_data.append({
+            'symbol': symbol,
+            'position_value_usd': position_value_usd,
+            'pnl_pct': pnl_pct,
+            'imbalance_pct': pos.get('imbalance_pct', 0.0)
+        })
+
+    return health_issues, critical_issues, dn_positions_count, position_pnl_data
+
+
 async def check_funding_rates():
     """CLI function to check funding rates for all available pairs."""
     print(Fore.CYAN + "Fetching funding rates for delta-neutral pairs..." + Style.RESET_ALL)
@@ -1395,6 +1673,210 @@ async def check_funding_rates():
     finally:
         await api_manager.close()
 
+async def check_portfolio_health():
+    """CLI function to perform portfolio health check."""
+    print(Fore.CYAN + "Performing portfolio health check..." + Style.RESET_ALL)
+
+    api_manager = AsterApiManager(
+        api_user=os.getenv('API_USER'),
+        api_signer=os.getenv('API_SIGNER'),
+        api_private_key=os.getenv('API_PRIVATE_KEY'),
+        apiv1_public=os.getenv('APIV1_PUBLIC_KEY'),
+        apiv1_private=os.getenv('APIV1_PRIVATE_KEY')
+    )
+
+    try:
+        print("Fetching current position data...")
+
+        # Use shared health check logic
+        health_issues, critical_issues, dn_positions_count, position_pnl_data = await perform_health_check_analysis(api_manager)
+
+        if dn_positions_count == 0:
+            print(Fore.YELLOW + "No delta-neutral positions found to check." + Style.RESET_ALL)
+            return
+
+        # Display results
+        print(Fore.GREEN + f"\n{'='*70}")
+        print("PORTFOLIO HEALTH CHECK RESULTS")
+        print(f"{'='*70}" + Style.RESET_ALL)
+
+        if critical_issues:
+            print(Fore.RED + "\nCRITICAL ISSUES:" + Style.RESET_ALL)
+            for issue in critical_issues:
+                print(Fore.RED + f"  {issue}" + Style.RESET_ALL)
+
+        if health_issues:
+            print(Fore.YELLOW + "\nWARNINGS:" + Style.RESET_ALL)
+            for issue in health_issues:
+                print(Fore.YELLOW + f"  {issue}" + Style.RESET_ALL)
+
+        # Display position PnL summary
+        if position_pnl_data:
+            print(Fore.CYAN + "\nPOSITION PnL SUMMARY:" + Style.RESET_ALL)
+            header = f"{'Symbol':<12} {'Value (USD)':<12} {'Imbalance':<10} {'PnL %':<10}"
+            print(header)
+            print("-" * len(header))
+
+            for pos_data in position_pnl_data:
+                symbol = pos_data['symbol']
+                value_usd = pos_data['position_value_usd']
+                imbalance_pct = pos_data['imbalance_pct']
+                pnl_pct = pos_data['pnl_pct']
+
+                # Color code PnL based on performance
+                if pnl_pct is not None:
+                    if pnl_pct >= -25:  # Good PnL (above -25%)
+                        pnl_color = Fore.GREEN
+                        pnl_str = f"{pnl_pct:+.2f}%"
+                    else:  # Bad PnL (below -25%, already in warnings/critical)
+                        pnl_color = Fore.RED
+                        pnl_str = f"{pnl_pct:+.2f}%"
+                else:
+                    pnl_color = Fore.YELLOW
+                    pnl_str = "N/A"
+
+                print(f"{symbol:<12} ${value_usd:<11.2f} {imbalance_pct:<9.2f}% {pnl_color}{pnl_str:<10}{Style.RESET_ALL}")
+
+        if not critical_issues and not health_issues:
+            print(Fore.GREEN + "\nALL CLEAR: No health issues detected with your positions." + Style.RESET_ALL)
+
+        # Summary
+        print(f"\n{Fore.CYAN}SUMMARY:")
+        print(f"  Delta-Neutral Positions Checked: {dn_positions_count}")
+        print(f"  Critical Issues Found:           {len(critical_issues)}")
+        print(f"  Warnings Found:                  {len(health_issues)}")
+        print(f"  Health Status:                   {'CRITICAL' if critical_issues else 'WARNING' if health_issues else 'HEALTHY'}{Style.RESET_ALL}")
+
+    except Exception as e:
+        print(Fore.RED + f"ERROR: Failed to perform health check: {e}" + Style.RESET_ALL)
+    finally:
+        await api_manager.close()
+
+async def rebalance_usdt_cli():
+    """CLI function to rebalance USDT between spot and perpetual accounts 50/50."""
+    print(Fore.CYAN + "Rebalancing USDT between spot and perpetual accounts..." + Style.RESET_ALL)
+
+    api_manager = AsterApiManager(
+        api_user=os.getenv('API_USER'),
+        api_signer=os.getenv('API_SIGNER'),
+        api_private_key=os.getenv('API_PRIVATE_KEY'),
+        apiv1_public=os.getenv('APIV1_PUBLIC_KEY'),
+        apiv1_private=os.getenv('APIV1_PRIVATE_KEY')
+    )
+
+    try:
+        # Get current balances
+        print("Fetching current account balances...")
+
+        # Get both spot and perpetual balances
+        results = await asyncio.gather(
+            api_manager.get_spot_account_balances(),
+            api_manager.get_perp_account_info(),
+            return_exceptions=True
+        )
+
+        spot_balances = results[0] if isinstance(results[0], list) else []
+        perp_account_info = results[1] if isinstance(results[1], dict) else {}
+
+        # Extract USDT balances
+        spot_usdt_balance = 0.0
+        for balance in spot_balances:
+            if balance.get('asset') == 'USDT':
+                spot_usdt_balance = float(balance.get('free', 0))
+                break
+
+        perp_usdt_balance = 0.0
+        perp_assets = perp_account_info.get('assets', [])
+        for asset in perp_assets:
+            if asset.get('asset') == 'USDT':
+                perp_usdt_balance = float(asset.get('availableBalance', 0))
+                break
+
+        # Display current status
+        total_usdt = spot_usdt_balance + perp_usdt_balance
+        target_each = total_usdt / 2
+
+        print(f"\nCurrent USDT Distribution:")
+        print(f"  Spot Account:        ${spot_usdt_balance:,.2f}")
+        print(f"  Perpetual Account:   ${perp_usdt_balance:,.2f}")
+        print(f"  Total Available:     ${total_usdt:,.2f}")
+        print(f"  Target Each (50/50): ${target_each:,.2f}")
+
+        # Calculate transfer needed
+        spot_difference = target_each - spot_usdt_balance
+
+        if abs(spot_difference) <= 1.0:
+            print(Fore.GREEN + f"\nAccounts are already balanced (difference: ${abs(spot_difference):.2f})." + Style.RESET_ALL)
+            return
+
+        # Determine transfer direction and amount
+        if spot_difference > 0:
+            # Need to transfer from perp to spot
+            direction = "PERP_TO_SPOT"
+            amount = abs(spot_difference)
+            print(f"\nTransfer Required: ${amount:.2f} from Perpetual to Spot")
+        else:
+            # Need to transfer from spot to perp
+            direction = "SPOT_TO_PERP"
+            amount = abs(spot_difference)
+            print(f"\nTransfer Required: ${amount:.2f} from Spot to Perpetual")
+
+        # Ask for confirmation
+        direction_text = direction.replace('_TO_', ' to ').replace('PERP', 'Perpetual').replace('SPOT', 'Spot')
+        print(Fore.YELLOW + f"\nConfirm transfer of ${amount:.2f} USDT ({direction_text})?" + Style.RESET_ALL)
+        confirmation = input("Type 'yes' to proceed: ").strip().lower()
+
+        if confirmation != 'yes':
+            print("Transfer cancelled.")
+            return
+
+        # Execute the transfer
+        print(f"Executing transfer...")
+        result = await api_manager.transfer_between_spot_and_perp('USDT', amount, direction)
+
+        if result.get('success'):
+            print(Fore.GREEN + f"[SUCCESS] Transfer completed successfully!" + Style.RESET_ALL)
+            print(f"Transaction ID: {result.get('tranId', 'N/A')}")
+
+            # Show updated balances
+            print("\nFetching updated balances...")
+
+            results = await asyncio.gather(
+                api_manager.get_spot_account_balances(),
+                api_manager.get_perp_account_info(),
+                return_exceptions=True
+            )
+
+            spot_balances = results[0] if isinstance(results[0], list) else []
+            perp_account_info = results[1] if isinstance(results[1], dict) else {}
+
+            # Extract updated USDT balances
+            new_spot_usdt = 0.0
+            for balance in spot_balances:
+                if balance.get('asset') == 'USDT':
+                    new_spot_usdt = float(balance.get('free', 0))
+                    break
+
+            new_perp_usdt = 0.0
+            perp_assets = perp_account_info.get('assets', [])
+            for asset in perp_assets:
+                if asset.get('asset') == 'USDT':
+                    new_perp_usdt = float(asset.get('availableBalance', 0))
+                    break
+
+            print(f"\nUpdated USDT Distribution:")
+            print(f"  Spot Account:        ${new_spot_usdt:,.2f}")
+            print(f"  Perpetual Account:   ${new_perp_usdt:,.2f}")
+            print(f"  Total Available:     ${new_spot_usdt + new_perp_usdt:,.2f}")
+
+        else:
+            print(Fore.RED + f"Transfer failed: {result.get('msg', 'Unknown error')}" + Style.RESET_ALL)
+
+    except Exception as e:
+        print(Fore.RED + f"ERROR: Failed to rebalance USDT: {e}" + Style.RESET_ALL)
+    finally:
+        await api_manager.close()
+
 def main():
     """The main function to run the bot."""
     parser = argparse.ArgumentParser(description="Delta-Neutral Funding Rate Farming Bot")
@@ -1404,6 +1886,8 @@ def main():
     parser.add_argument('--positions', action='store_true', help="Show current delta-neutral positions and portfolio summary")
     parser.add_argument('--spot-assets', action='store_true', help="Show current spot asset balances with USD values")
     parser.add_argument('--perpetual', action='store_true', help="Show current perpetual positions with PnL analysis")
+    parser.add_argument('--health-check', action='store_true', help="Perform portfolio health check for position risks")
+    parser.add_argument('--rebalance', action='store_true', help="Rebalance USDT between spot and perpetual accounts 50/50")
     args = parser.parse_args()
 
     # Check for required environment variables
@@ -1445,6 +1929,20 @@ def main():
     if args.perpetual:
         try:
             asyncio.run(check_perpetual_positions())
+        except KeyboardInterrupt:
+            print("\nOperation cancelled.")
+        return
+
+    if getattr(args, 'health_check', False):
+        try:
+            asyncio.run(check_portfolio_health())
+        except KeyboardInterrupt:
+            print("\nOperation cancelled.")
+        return
+
+    if args.rebalance:
+        try:
+            asyncio.run(rebalance_usdt_cli())
         except KeyboardInterrupt:
             print("\nOperation cancelled.")
         return

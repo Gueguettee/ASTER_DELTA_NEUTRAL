@@ -10,6 +10,7 @@ import math
 from decimal import Decimal
 from typing import Dict, List, Optional, Any
 from ASTER_codes.api_client import ApiClient
+from strategy_logic import DeltaNeutralLogic
 
 # Base URLs for the APIs
 FUTURES_BASE_URL = "https://fapi.asterdex.com"
@@ -233,6 +234,96 @@ class AsterApiManager:
         }
         return await self.perp_client.signed_request('POST', '/fapi/v3/order', params)
 
+    # --- Transfer Methods ---
+
+    async def transfer_between_spot_and_perp(self, asset: str, amount: float, direction: str) -> dict:
+        """
+        Transfer assets between spot and perpetual accounts.
+
+        Args:
+            asset: Asset to transfer (e.g., 'USDT')
+            amount: Amount to transfer
+            direction: 'SPOT_TO_PERP' or 'PERP_TO_SPOT'
+
+        Returns:
+            Transfer response with transaction ID and status
+        """
+        if not self.perp_client.session:
+            self.perp_client.session = aiohttp.ClientSession()
+
+        # Generate unique transaction ID
+        client_tran_id = f"transfer_{int(time.time() * 1000000)}"
+
+        # Map direction to API parameter
+        direction_map = {
+            'SPOT_TO_PERP': 'SPOT_FUTURE',
+            'PERP_TO_SPOT': 'FUTURE_SPOT'
+        }
+
+        if direction not in direction_map:
+            raise ValueError(f"Invalid direction: {direction}. Must be 'SPOT_TO_PERP' or 'PERP_TO_SPOT'")
+
+        params = {
+            'asset': asset,
+            'amount': str(amount),
+            'clientTranId': client_tran_id,
+            'kindType': direction_map[direction]
+        }
+
+        return await self.perp_client.signed_request('POST', '/fapi/v3/asset/wallet/transfer', params)
+
+    async def rebalance_usdt_50_50(self) -> dict:
+        """
+        Automatically rebalance USDT to be 50/50 between spot and perpetual accounts.
+
+        Returns:
+            Dictionary with rebalance details and transfer result (if transfer was needed)
+        """
+        # Get current balances
+        spot_balances = await self.get_spot_account_balances()
+        perp_account = await self.get_perp_account_info()
+
+        # Extract USDT balances
+        spot_usdt = next((float(b.get('free', 0)) for b in spot_balances if b.get('asset') == 'USDT'), 0.0)
+
+        # Get USDT from perpetual account assets
+        perp_assets = perp_account.get('assets', [])
+        perp_usdt = next((float(a.get('walletBalance', 0)) for a in perp_assets if a.get('asset') == 'USDT'), 0.0)
+
+        total_usdt = spot_usdt + perp_usdt
+        target_each = total_usdt / 2
+
+        # Calculate transfer needed
+        spot_difference = target_each - spot_usdt
+
+        result = {
+            'current_spot_usdt': spot_usdt,
+            'current_perp_usdt': perp_usdt,
+            'total_usdt': total_usdt,
+            'target_each': target_each,
+            'transfer_needed': abs(spot_difference) > 1.0,  # Only transfer if difference > $1
+            'transfer_amount': abs(spot_difference),
+            'transfer_direction': None,
+            'transfer_result': None
+        }
+
+        # Perform transfer if needed (minimum $1 difference to avoid micro-transfers)
+        if abs(spot_difference) > 1.0:
+            if spot_difference > 0:
+                # Need to transfer from perp to spot
+                result['transfer_direction'] = 'PERP_TO_SPOT'
+                result['transfer_result'] = await self.transfer_between_spot_and_perp(
+                    'USDT', abs(spot_difference), 'PERP_TO_SPOT'
+                )
+            else:
+                # Need to transfer from spot to perp
+                result['transfer_direction'] = 'SPOT_TO_PERP'
+                result['transfer_result'] = await self.transfer_between_spot_and_perp(
+                    'USDT', abs(spot_difference), 'SPOT_TO_PERP'
+                )
+
+        return result
+
     # --- Symbol Discovery and Analysis ---
 
     async def get_available_spot_symbols(self) -> List[str]:
@@ -287,9 +378,8 @@ class AsterApiManager:
 
     async def analyze_current_positions(self) -> Dict[str, Dict[str, Any]]:
         """Analyze current open positions across spot and perpetual markets."""
-        analysis = {}
         try:
-            # Ensure all exchange info is cached for other methods to use
+            # Fetch all required data concurrently
             perp_info, spot_info, perp_account, spot_balances = await asyncio.gather(
                 self._get_perp_exchange_info(),
                 self._get_spot_exchange_info(),
@@ -300,35 +390,39 @@ class AsterApiManager:
             if isinstance(perp_info, Exception) or isinstance(spot_info, Exception) or isinstance(perp_account, Exception) or isinstance(spot_balances, Exception):
                 return {}
 
+            # Prepare data for strategy logic
             spot_lookup = {b.get('asset', ''): float(b.get('free', '0')) + float(b.get('locked', '0')) for b in spot_balances}
             perp_symbol_map = {s['symbol']: s for s in perp_info.get('symbols', [])}
+            perp_positions = perp_account.get('positions', [])
 
-            for position in perp_account.get('positions', []):
-                symbol = position.get('symbol', '')
-                perp_qty = float(position.get('positionAmt', '0'))
-                if not symbol or abs(perp_qty) < 1e-9: continue
+            # Filter for positions with non-zero amounts and fetch current prices
+            active_positions = [p for p in perp_positions if float(p.get('positionAmt', 0)) != 0]
+            if active_positions:
+                # Fetch current mark prices for all active positions
+                price_tasks = [self.get_perp_book_ticker(p['symbol']) for p in active_positions]
+                price_results = await asyncio.gather(*price_tasks, return_exceptions=True)
 
-                base_asset = perp_symbol_map.get(symbol, {}).get('baseAsset', '')
-                spot_qty = spot_lookup.get(base_asset, 0.0)
-                
-                net_delta = spot_qty + perp_qty
-                total_size = max(abs(spot_qty), abs(perp_qty))
-                imbalance_pct = abs(net_delta) / total_size * 100 if total_size > 0 else 0.0
-                is_delta_neutral = imbalance_pct <= 2.0
+                # Update positions with current mark prices
+                for i, pos in enumerate(active_positions):
+                    price_data = price_results[i]
+                    if not isinstance(price_data, Exception) and price_data.get('bidPrice') and price_data.get('askPrice'):
+                        # Use mid-price as mark price
+                        bid_price = float(price_data['bidPrice'])
+                        ask_price = float(price_data['askPrice'])
+                        pos['markPrice'] = (bid_price + ask_price) / 2
+                    # If price fetch fails, keep existing markPrice or set to 0
 
-                mark_price = float(position.get('markPrice', '0'))
-                position_value_usd = abs(perp_qty) * mark_price
+            # Use strategy logic for computational analysis
+            analysis = DeltaNeutralLogic.analyze_position_data(
+                perp_positions=perp_positions,
+                spot_balances=spot_lookup,
+                perp_symbol_map=perp_symbol_map
+            )
 
-                analysis[symbol] = {
-                    'symbol': symbol, 'spot_balance': spot_qty, 'perp_position': perp_qty,
-                    'is_delta_neutral': is_delta_neutral, 'imbalance_pct': imbalance_pct,
-                    'net_delta': net_delta, 'position_value_usd': position_value_usd,
-                    'leverage': int(float(position.get('leverage', '1'))),
-                }
+            return analysis
         except Exception as e:
             print(f"Error analyzing positions: {e}")
             return {}
-        return analysis
 
     async def close(self):
         """Close the HTTP session and perpetual client session."""
