@@ -405,6 +405,195 @@ class TestAsterApiManagerIntegration(unittest.IsolatedAsyncioTestCase):
         finally:
             await manager.close()
 
+    async def test_transfer_methods_structure(self):
+        """Test 6: Transfer Methods Structure and Validation"""
+        manager = AsterApiManager(
+            self.api_user, self.api_signer, self.api_private_key,
+            self.apiv1_public, self.apiv1_private
+        )
+
+        try:
+            # Test invalid direction validation
+            with self.assertRaises(ValueError):
+                await manager.transfer_between_spot_and_perp('USDT', 10.0, 'INVALID_DIRECTION')
+
+            # Test that rebalance method returns proper structure (without executing transfer)
+            # We'll mock the balances to avoid real transfers
+            original_get_spot = manager.get_spot_account_balances
+            original_get_perp = manager.get_perp_account_info
+
+            # Mock balanced accounts (no transfer needed)
+            async def mock_spot_balances():
+                return [{'asset': 'USDT', 'free': '100.0', 'locked': '0.0'}]
+
+            async def mock_perp_account():
+                return {
+                    'assets': [{'asset': 'USDT', 'walletBalance': '100.0'}]
+                }
+
+            manager.get_spot_account_balances = mock_spot_balances
+            manager.get_perp_account_info = mock_perp_account
+
+            result = await manager.rebalance_usdt_50_50()
+
+            # Verify structure
+            self.assertIn('current_spot_usdt', result)
+            self.assertIn('current_perp_usdt', result)
+            self.assertIn('total_usdt', result)
+            self.assertIn('target_each', result)
+            self.assertIn('transfer_needed', result)
+            self.assertIn('transfer_amount', result)
+
+            # With balanced accounts, no transfer should be needed
+            self.assertFalse(result['transfer_needed'])
+            self.assertEqual(result['current_spot_usdt'], 100.0)
+            self.assertEqual(result['current_perp_usdt'], 100.0)
+            self.assertEqual(result['total_usdt'], 200.0)
+            self.assertEqual(result['target_each'], 100.0)
+
+            # Restore original methods
+            manager.get_spot_account_balances = original_get_spot
+            manager.get_perp_account_info = original_get_perp
+
+        finally:
+            await manager.close()
+
+    async def test_rebalance_transfer_needed_calculation(self):
+        """Test 7: Rebalance Transfer Calculation Logic"""
+        manager = AsterApiManager(
+            self.api_user, self.api_signer, self.api_private_key,
+            self.apiv1_public, self.apiv1_private
+        )
+
+        try:
+            original_get_spot = manager.get_spot_account_balances
+            original_get_perp = manager.get_perp_account_info
+            original_transfer = manager.transfer_between_spot_and_perp
+
+            # Mock imbalanced accounts (spot has more)
+            async def mock_spot_balances():
+                return [{'asset': 'USDT', 'free': '150.0', 'locked': '0.0'}]
+
+            async def mock_perp_account():
+                return {
+                    'assets': [{'asset': 'USDT', 'walletBalance': '50.0'}]
+                }
+
+            # Mock transfer to avoid real execution
+            async def mock_transfer(asset, amount, direction):
+                return {'tranId': 12345, 'status': 'SUCCESS'}
+
+            manager.get_spot_account_balances = mock_spot_balances
+            manager.get_perp_account_info = mock_perp_account
+            manager.transfer_between_spot_and_perp = mock_transfer
+
+            result = await manager.rebalance_usdt_50_50()
+
+            # Should identify need for transfer from spot to perp
+            self.assertTrue(result['transfer_needed'])
+            self.assertEqual(result['current_spot_usdt'], 150.0)
+            self.assertEqual(result['current_perp_usdt'], 50.0)
+            self.assertEqual(result['total_usdt'], 200.0)
+            self.assertEqual(result['target_each'], 100.0)
+            self.assertEqual(result['transfer_amount'], 50.0)
+            self.assertEqual(result['transfer_direction'], 'SPOT_TO_PERP')
+            self.assertIsNotNone(result['transfer_result'])
+
+            # Restore original methods
+            manager.get_spot_account_balances = original_get_spot
+            manager.get_perp_account_info = original_get_perp
+            manager.transfer_between_spot_and_perp = original_transfer
+
+        finally:
+            await manager.close()
+
+    async def test_transfer_execution_live(self):
+        """
+        Test 8: Live Transfer Execution (REQUIRES USER CONFIRMATION)
+        WARNING: This test executes REAL transfers!
+        """
+        print("\n" + "="*80)
+        print("**WARNING: This test will execute REAL transfers between accounts!**")
+        print("This will move actual USDT between your spot and perpetual accounts.")
+        print("Use a dedicated test account with minimal funds.")
+        print("="*80)
+
+        # Prompt for user confirmation
+        try:
+            response = input("\nPress 'y' and Enter to proceed with live transfer test (any other key to skip): ")
+            if response.lower() != 'y':
+                self.skipTest("Live transfer test skipped by user")
+        except EOFError:
+            self.skipTest("Live transfer test skipped - not running in interactive mode")
+
+        manager = AsterApiManager(
+            self.api_user, self.api_signer, self.api_private_key,
+            self.apiv1_public, self.apiv1_private
+        )
+
+        try:
+            # Get current balances
+            print("Fetching current balances...")
+            spot_balances = await manager.get_spot_account_balances()
+            perp_account = await manager.get_perp_account_info()
+
+            spot_usdt = next((float(b.get('free', 0)) for b in spot_balances if b.get('asset') == 'USDT'), 0.0)
+            perp_assets = perp_account.get('assets', [])
+            perp_usdt = next((float(a.get('walletBalance', 0)) for a in perp_assets if a.get('asset') == 'USDT'), 0.0)
+
+            print(f"Current USDT balances - Spot: ${spot_usdt:.2f}, Perp: ${perp_usdt:.2f}")
+
+            # Only proceed if we have sufficient balance for test transfer
+            total_usdt = spot_usdt + perp_usdt
+            if total_usdt < 10.0:
+                self.skipTest(f"Insufficient USDT balance for test: ${total_usdt:.2f} (need at least $10)")
+
+            # Test small transfer (1 USDT) from the account with more balance
+            test_amount = 1.0
+            if spot_usdt > perp_usdt:
+                direction = 'SPOT_TO_PERP'
+                print(f"Testing transfer of ${test_amount} from spot to perpetual...")
+            else:
+                direction = 'PERP_TO_SPOT'
+                print(f"Testing transfer of ${test_amount} from perpetual to spot...")
+
+            # Execute transfer
+            transfer_result = await manager.transfer_between_spot_and_perp('USDT', test_amount, direction)
+
+            # Verify transfer response
+            self.assertIn('tranId', transfer_result)
+            self.assertIn('status', transfer_result)
+            print(f"Transfer completed - Transaction ID: {transfer_result['tranId']}, Status: {transfer_result['status']}")
+
+            # Wait for transfer to process
+            print("Waiting 3 seconds for transfer to process...")
+            await asyncio.sleep(3)
+
+            # Verify balances changed
+            print("Verifying balance changes...")
+            new_spot_balances = await manager.get_spot_account_balances()
+            new_perp_account = await manager.get_perp_account_info()
+
+            new_spot_usdt = next((float(b.get('free', 0)) for b in new_spot_balances if b.get('asset') == 'USDT'), 0.0)
+            new_perp_assets = new_perp_account.get('assets', [])
+            new_perp_usdt = next((float(a.get('walletBalance', 0)) for a in new_perp_assets if a.get('asset') == 'USDT'), 0.0)
+
+            print(f"New USDT balances - Spot: ${new_spot_usdt:.2f}, Perp: ${new_perp_usdt:.2f}")
+
+            # Check that total balance is preserved (allowing for small rounding differences)
+            new_total = new_spot_usdt + new_perp_usdt
+            self.assertAlmostEqual(total_usdt, new_total, places=1)
+            print("✓ Total balance preserved")
+
+            # Reverse the transfer to restore original state
+            print(f"Reversing transfer to restore original state...")
+            reverse_direction = 'PERP_TO_SPOT' if direction == 'SPOT_TO_PERP' else 'SPOT_TO_PERP'
+            reverse_result = await manager.transfer_between_spot_and_perp('USDT', test_amount, reverse_direction)
+            print(f"Reverse transfer completed - Transaction ID: {reverse_result['tranId']}")
+
+        finally:
+            await manager.close()
+
     async def test_full_order_lifecycle(self):
         """
         Test 5: Controlled Execution Workflow
