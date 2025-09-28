@@ -4,6 +4,8 @@ This project is a terminal-based Python application for managing a delta-neutral
 
 **Support this project**: Use referral link https://www.asterdex.com/en/referral/164f81 to get 10% rebate on trading fees (maximum rebate rate for you).
 
+You don't need to run the bot continuously. You can use it to rebalance USDT between Perp and Spot, check the funding rates and opportunities, open and close delta neutral positions, and perform a health check and rebalance once in a while.
+
 ## Dashboard Preview
 
 ![Terminal Screenshot](terminal.png)
