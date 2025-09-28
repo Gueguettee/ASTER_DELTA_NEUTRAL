@@ -8,7 +8,7 @@ You don't need to run the bot continuously. You can use it to rebalance USDT bet
 
 ## Dashboard Preview
 
-![Terminal Screenshot](terminal.png)
+<img src="terminal.png" alt="Terminal Screenshot" width="800"/>
 
 ## Core Architecture
 
