@@ -650,6 +650,12 @@ class DashboardApp:
 
             # Display health check results
             print("\n" + Fore.CYAN + "=== PORTFOLIO HEALTH CHECK ===" + Style.RESET_ALL)
+            print(Fore.CYAN + "Health Check Criteria:" + Style.RESET_ALL)
+            print(f"  {Fore.GREEN}Spot USD > $10{Style.RESET_ALL}: Healthy")
+            print(f"  {Fore.YELLOW}Spot USD < $10{Style.RESET_ALL}: Warning (rebalancing advised)")
+            print(f"  {Fore.RED}Spot USD < $5{Style.RESET_ALL}: Critical (impossible to close)")
+            print(f"  {Fore.YELLOW}Short PnL < -25%{Style.RESET_ALL}: Warning")
+            print(f"  {Fore.RED}Short PnL < -50%{Style.RESET_ALL}: Critical")
 
             if critical_issues:
                 print(Fore.RED + "\nCRITICAL ISSUES:" + Style.RESET_ALL)
@@ -664,15 +670,24 @@ class DashboardApp:
             # Display position PnL summary
             if position_pnl_data:
                 print(Fore.CYAN + "\nPOSITION PnL SUMMARY:" + Style.RESET_ALL)
-                header = f"{'Symbol':<12} {'Value (USD)':<12} {'Imbalance':<10} {'PnL %':<10}"
+                header = f"{'Symbol':<12} {'Value (USD)':<12} {'Spot (USD)':<12} {'Imbalance':<10} {'PnL %':<10}"
                 print(header)
                 print("-" * len(header))
 
                 for pos_data in position_pnl_data:
                     symbol = pos_data['symbol']
                     value_usd = pos_data['position_value_usd']
+                    spot_value_usd = pos_data['spot_value_usd']
                     imbalance_pct = pos_data['imbalance_pct']
                     pnl_pct = pos_data['pnl_pct']
+
+                    # Color code based on spot value thresholds
+                    if spot_value_usd < 5:
+                        row_color = Fore.RED  # Critical
+                    elif spot_value_usd < 10:
+                        row_color = Fore.YELLOW  # Warning
+                    else:
+                        row_color = Fore.GREEN  # Healthy
 
                     # Color code PnL based on performance
                     if pnl_pct is not None:
@@ -686,10 +701,17 @@ class DashboardApp:
                         pnl_color = Fore.YELLOW
                         pnl_str = "N/A"
 
-                    print(f"{symbol:<12} ${value_usd:<11.2f} {imbalance_pct:<9.2f}% {pnl_color}{pnl_str:<10}{Style.RESET_ALL}")
+                    print(f"{row_color}{symbol:<12} ${value_usd:<11.2f} ${spot_value_usd:<11.2f} {imbalance_pct:<9.2f}% {pnl_color}{pnl_str:<10}{Style.RESET_ALL}")
 
             if not critical_issues and not health_issues:
                 print(Fore.GREEN + "\nALL CLEAR: No health issues detected with your positions." + Style.RESET_ALL)
+            else:
+                print(f"\n{Fore.CYAN}RECOMMENDATION:{Style.RESET_ALL}")
+                if critical_issues:
+                    print(f"{Fore.RED}  URGENT: Critical issues detected. Consider immediate rebalancing or position closure.{Style.RESET_ALL}")
+                else:
+                    print(f"{Fore.YELLOW}  Consider rebalancing your positions to address the warnings above.{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}  Use 'r' in the dashboard or run: python delta_neutral_bot.py --rebalance{Style.RESET_ALL}")
 
             print(f"\n{Fore.CYAN}Health check complete. Press Enter to return to dashboard...{Style.RESET_ALL}")
             await self._get_user_input("")
@@ -1432,7 +1454,7 @@ def render_delta_neutral_positions(positions_data, title="Delta-Neutral Position
         print(f"{indent}No delta-neutral positions found.")
         return
 
-    header = f"{'Symbol':<12} {'Spot Balance':>15} {'Perp Position':>15} {'Net Delta':>12} {'Value (USD)':>15} {'Imbalance':>12} {' Eff. APR (%)':>12}"
+    header = f"{'Symbol':<12} {'Spot Balance':>15} {'Spot USD':>12} {'Perp Position':>15} {'Net Delta':>12} {'Value (USD)':>15} {'Imbalance':>12} {' Eff. APR (%)':>12}"
     print(f"{indent}{header}")
     print(f"{indent}" + "-" * len(header))
 
@@ -1447,9 +1469,21 @@ def render_delta_neutral_positions(positions_data, title="Delta-Neutral Position
         apr = pos.get('current_apr', 'N/A')
         apr_str = f"{apr/2.0:.2f}" if isinstance(apr, (int, float)) else str(apr)
 
+        # Calculate spot value in USD
+        current_price = pos.get('current_price', 0.0)
+        spot_value_usd = spot_balance * current_price
+
         total_dn_value += value_usd
 
-        print(Fore.CYAN + f"{indent}{symbol:<12} {spot_balance:>15.6f} {perp_position:>15.6f} {net_delta:>12.6f} {value_usd:>15,.2f} {imbalance:>11.2f}% {apr_str:>10}" + Style.RESET_ALL)
+        # Color coding based on spot value warning levels
+        if spot_value_usd < 5:
+            row_color = Fore.RED  # Critical - below $5
+        elif spot_value_usd < 10:
+            row_color = Fore.YELLOW  # Warning - below $10
+        else:
+            row_color = Fore.GREEN  # Healthy - above $10
+
+        print(row_color + f"{indent}{symbol:<12} {spot_balance:>15.6f} ${spot_value_usd:>10.2f} {perp_position:>15.6f} {net_delta:>12.6f} {value_usd:>15,.2f} {imbalance:>11.2f}% {apr_str:>10}" + Style.RESET_ALL)
 
     print(f"{indent}{Fore.CYAN}Total Delta-Neutral Value: ${total_dn_value:,.2f}{Style.RESET_ALL}")
 
@@ -1605,12 +1639,16 @@ async def perform_health_check_analysis(api_manager):
             else:
                 health_issues.append(f"WARNING: {symbol} spot position value: ${spot_value_usd:.2f} (below $10 - rebalancing advised)")
 
+        # Update position with current price for rendering
+        pos['current_price'] = current_price
+
         # Store position data for display
         position_pnl_data.append({
             'symbol': symbol,
             'position_value_usd': position_value_usd,
             'pnl_pct': pnl_pct,
-            'imbalance_pct': pos.get('imbalance_pct', 0.0)
+            'imbalance_pct': pos.get('imbalance_pct', 0.0),
+            'spot_value_usd': spot_value_usd
         })
 
     return health_issues, critical_issues, dn_positions_count, position_pnl_data
@@ -1700,6 +1738,13 @@ async def check_portfolio_health():
         print("PORTFOLIO HEALTH CHECK RESULTS")
         print(f"{'='*70}" + Style.RESET_ALL)
 
+        print(Fore.CYAN + "\nHealth Check Criteria:" + Style.RESET_ALL)
+        print(f"  {Fore.GREEN}Spot USD > $10{Style.RESET_ALL}: Healthy")
+        print(f"  {Fore.YELLOW}Spot USD < $10{Style.RESET_ALL}: Warning (rebalancing advised)")
+        print(f"  {Fore.RED}Spot USD < $5{Style.RESET_ALL}: Critical (impossible to close)")
+        print(f"  {Fore.YELLOW}Short PnL < -25%{Style.RESET_ALL}: Warning")
+        print(f"  {Fore.RED}Short PnL < -50%{Style.RESET_ALL}: Critical")
+
         if critical_issues:
             print(Fore.RED + "\nCRITICAL ISSUES:" + Style.RESET_ALL)
             for issue in critical_issues:
@@ -1713,15 +1758,24 @@ async def check_portfolio_health():
         # Display position PnL summary
         if position_pnl_data:
             print(Fore.CYAN + "\nPOSITION PnL SUMMARY:" + Style.RESET_ALL)
-            header = f"{'Symbol':<12} {'Value (USD)':<12} {'Imbalance':<10} {'PnL %':<10}"
+            header = f"{'Symbol':<12} {'Value (USD)':<12} {'Spot (USD)':<12} {'Imbalance':<10} {'PnL %':<10}"
             print(header)
             print("-" * len(header))
 
             for pos_data in position_pnl_data:
                 symbol = pos_data['symbol']
                 value_usd = pos_data['position_value_usd']
+                spot_value_usd = pos_data['spot_value_usd']
                 imbalance_pct = pos_data['imbalance_pct']
                 pnl_pct = pos_data['pnl_pct']
+
+                # Color code based on spot value thresholds
+                if spot_value_usd < 5:
+                    row_color = Fore.RED  # Critical
+                elif spot_value_usd < 10:
+                    row_color = Fore.YELLOW  # Warning
+                else:
+                    row_color = Fore.GREEN  # Healthy
 
                 # Color code PnL based on performance
                 if pnl_pct is not None:
@@ -1735,10 +1789,17 @@ async def check_portfolio_health():
                     pnl_color = Fore.YELLOW
                     pnl_str = "N/A"
 
-                print(f"{symbol:<12} ${value_usd:<11.2f} {imbalance_pct:<9.2f}% {pnl_color}{pnl_str:<10}{Style.RESET_ALL}")
+                print(f"{row_color}{symbol:<12} ${value_usd:<11.2f} ${spot_value_usd:<11.2f} {imbalance_pct:<9.2f}% {pnl_color}{pnl_str:<10}{Style.RESET_ALL}")
 
         if not critical_issues and not health_issues:
             print(Fore.GREEN + "\nALL CLEAR: No health issues detected with your positions." + Style.RESET_ALL)
+        else:
+            print(f"\n{Fore.CYAN}RECOMMENDATION:{Style.RESET_ALL}")
+            if critical_issues:
+                print(f"{Fore.RED}  URGENT: Critical issues detected. Consider immediate rebalancing or position closure.{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}  Consider rebalancing your positions to address the warnings above.{Style.RESET_ALL}")
+            print(f"{Fore.CYAN}  Run: python delta_neutral_bot.py --rebalance{Style.RESET_ALL}")
 
         # Summary
         print(f"\n{Fore.CYAN}SUMMARY:")

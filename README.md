@@ -138,7 +138,13 @@ python delta_neutral_bot.py --test
 
 ### Enhanced Dashboard & CLI
 
-- **Health Check Workflow**: New interactive (`H` key) and CLI (`--health-check`) functionality to analyze position imbalance, PnL, and liquidation risk.
+- **Advanced Health Check System**:
+  - Interactive (`H` key) and CLI (`--health-check`) functionality with comprehensive position analysis
+  - **Visual Spot Value Monitoring**: Color-coded USD values (Green >$10, Yellow <$10, Red <$5)
+  - **Critical Threshold Warnings**: Automatic alerts when spot positions approach $5 minimum (impossible to close)
+  - **PnL Risk Assessment**: Short position monitoring with warnings at -25% and critical alerts at -50%
+  - **Smart Rebalancing Recommendations**: Contextual advice with direct command suggestions
+  - **Health Criteria Display**: Clear explanation of all monitoring thresholds and color coding
 - **USDT Rebalancing**: Interactive (`B` key) and CLI (`--rebalance`) tool to automatically balance USDT funds 50/50 between spot and perpetual accounts.
 - **Compact Layout**: Optimized spacing for better information density.
 - **Modular Rendering**: All dashboard and CLI sections use reusable common rendering functions.
