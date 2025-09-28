@@ -74,8 +74,8 @@ APIV1_PRIVATE_KEY=...
 
 See also `.env.example.`
 
-<img src="infos_API_p1.png" alt="Info API 1" width="800"/>
-<img src="infos_API_p1.png" alt="Info API 1" width="800"/>
+<img src="infos_API_p1.png" alt="Info API 1" width="600"/>
+<img src="infos_API_p1.png" alt="Info API 1" width="600"/>
 
 #### 3. Run the Bot
 
