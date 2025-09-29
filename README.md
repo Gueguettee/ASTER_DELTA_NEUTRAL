@@ -134,11 +134,11 @@ The `--open` and `--close` commands can be run in two modes:
 # Launch the interactive workflow to select a symbol and enter capital
 python delta_neutral_bot.py --open
 
-# Open a $100 position on BTCUSDT (will show a plan and ask for confirmation)
-python delta_neutral_bot.py --open BTCUSDT 100
+# Open a $120 position on BTCUSDT (will show a plan and ask for confirmation)
+python delta_neutral_bot.py --open BTCUSDT 120
 
-# Open a $100 position on BTCUSDT without a confirmation prompt
-python delta_neutral_bot.py --open BTCUSDT 100 --yes
+# Open a $120 position on BTCUSDT without a confirmation prompt
+python delta_neutral_bot.py --open BTCUSDT 120 --yes
 
 
 # --- Close a Position ---
@@ -163,24 +163,6 @@ python delta_neutral_bot.py --close BTCUSDT --yes
 - **Performance Metrics**: Real-time PnL calculations in both USD and percentage
 - **Clean Session Management**: Proper cleanup and resource management
 
-## Recent Improvements
-
-### Enhanced Dashboard & CLI
-
-- **Advanced Health Check System**:
-  - Interactive (`H` key) and CLI (`--health-check`) functionality with comprehensive position analysis
-  - **Visual Spot Value Monitoring**: Color-coded USD values (Green >$10, Yellow <$10, Red <$5)
-  - **Critical Threshold Warnings**: Automatic alerts when spot positions approach $5 minimum (impossible to close)
-  - **PnL Risk Assessment**: Short position monitoring with warnings at -25% and critical alerts at -50%
-  - **Smart Rebalancing Recommendations**: Contextual advice with direct command suggestions
-  - **Health Criteria Display**: Clear explanation of all monitoring thresholds and color coding
-- **USDT Rebalancing**: Interactive (`B` key) and CLI (`--rebalance`) tool to automatically balance USDT funds 50/50 between spot and perpetual accounts.
-- **Compact Layout**: Optimized spacing for better information density.
-- **Modular Rendering**: All dashboard and CLI sections use reusable common rendering functions.
-- **Real-time Data**: Live perpetual positions with percentage PnL tracking.
-- **Funding Rate Analysis**: Effective APR calculations for 1x leverage strategies.
-- **Portfolio Analytics**: Comprehensive position analysis with delta-neutral detection.
-
 ### Code Architecture Enhancements
 
 - **Automated Precision Handling**: All order placement methods now automatically format price and quantity to meet exchange-specific precision requirements.
@@ -189,12 +171,6 @@ python delta_neutral_bot.py --close BTCUSDT --yes
 - **DRY Principle**: Eliminated code duplication with shared rendering and analysis functions.
 - **Consistent Terminology**: Unified "perpetual" naming throughout the codebase.
 - **Error Handling**: Improved API error suppression during price discovery.
-
-### Testing & Quality
-
-- **Comprehensive Testing**: 45+ unit tests covering the API manager, strategy logic, and new CLI commands.
-- **Integration Tests**: Real API validation with automatic credential detection, including tests for live order placement and fund transfers.
-- **Verification Scripts**: Automated validation of core functionality.
 
 ### Method 2: Running with Docker (Recommended for Development)
 
