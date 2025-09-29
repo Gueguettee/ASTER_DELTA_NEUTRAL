@@ -73,31 +73,79 @@ python -c "import strategy_logic; print('Strategy logic import successful!')"
 
 ## Architecture Overview
 
-### Three-Tier Modular Design (as per mega_plan.md)
+### Six-Module Architecture (Refactored from Three-Tier Design)
 
-1. **`aster_api_manager.py`** - The Exchange Gateway (15 methods)
+#### Core Modules
+
+1. **`aster_api_manager.py`** - The Exchange Gateway (931 lines, 17 methods)
    - Unified API manager for both Aster Perpetual and Spot markets
    - Handles dual authentication: Ethereum signatures (perps) + HMAC-SHA256 (spot)
    - Lazy session management with proper async cleanup
    - All read/write operations for market data and order execution
    - Leverage management: checking and setting leverage (default 1x for delta-neutral)
-   - Position analysis: detects delta-neutral setups with 2% imbalance threshold
+   - Position analysis: `perform_funding_analysis()` and `perform_health_check_analysis()`
+   - Detects delta-neutral setups with 2% imbalance threshold
 
-2. **`strategy_logic.py`** - The Brain (COMPLETE)
+2. **`strategy_logic.py`** - The Brain (518 lines)
    - Pure computational logic for delta-neutral strategy
    - Stateless functions for opportunity analysis and position sizing
    - Risk management and health monitoring calculations
    - Dynamic pair discovery and liquidity filtering
    - Comprehensive rebalancing and validation logic
 
-3. **`delta_neutral_bot.py`** - The UI & Orchestrator (COMPLETE - 1400+ lines)
+3. **`delta_neutral_bot.py`** - The UI & Orchestrator (1,004 lines)
    - Terminal-based dashboard with real-time updates and colorized output
    - User interaction and confirmation workflows with keyboard controls
    - Integration of API manager and strategy logic
    - Cross-platform compatibility (Windows/Linux/Mac)
    - Comprehensive error handling and session management
-   - **Modular Rendering**: Common functions for table rendering shared between CLI and dashboard
-   - **6 CLI Commands**: Complete command-line interface for non-interactive usage
+   - Main application loop and interactive workflows
+
+#### Supporting Modules
+
+4. **`ui_renderers.py`** - UI Rendering Functions (319 lines)
+   - Pure rendering functions for terminal output
+   - Ensures consistent formatting across CLI and dashboard
+   - **Functions:**
+     - `render_funding_rates_table()` - Funding rates with APR calculations
+     - `render_perpetual_positions_table()` - Perpetual positions with PnL
+     - `render_portfolio_summary()` - Account balance summary
+     - `render_delta_neutral_positions()` - Delta-neutral position details
+     - `render_spot_balances()` - Spot asset balances
+     - `render_other_positions()` - Non-delta-neutral holdings
+     - `render_opportunities()` - Available trading opportunities
+     - `render_funding_analysis_results()` - Funding payment analysis
+
+5. **`cli_commands.py`** - CLI Command Functions (497 lines)
+   - Standalone command-line interface for non-interactive operation
+   - Direct access to all bot features via command arguments
+   - **Functions:**
+     - `check_available_pairs()` - List delta-neutral pairs
+     - `check_current_positions()` - Show portfolio summary
+     - `check_spot_assets()` - Display spot balances
+     - `check_perpetual_positions()` - Show perpetual positions
+     - `check_funding_rates()` - List current funding rates
+     - `check_portfolio_health()` - Perform health check
+     - `rebalance_usdt_cli()` - Rebalance USDT between accounts
+     - `open_position_cli()` - Open delta-neutral position
+     - `close_position_cli()` - Close delta-neutral position
+     - `analyze_fundings_cli()` - Analyze funding payments
+
+6. **`utils.py`** - Shared Utilities (30 lines)
+   - Common utility functions used across multiple modules
+   - **Functions:**
+     - `truncate()` - Precision-aware number truncation for exchange compliance
+
+#### Architecture Benefits
+
+- **Modularity**: Each module has a single, well-defined responsibility
+- **Reduced Size**: Main orchestrator reduced from 1,964 to 1,004 lines (49% reduction)
+- **Zero Duplication**: Shared functions eliminate code repetition
+- **Reusability**: UI renderers and CLI commands can be imported anywhere
+- **Testability**: Pure functions and clear boundaries enable comprehensive testing
+- **Maintainability**: Changes in one area don't cascade to unrelated code
+- **DRY Principle**: Single source of truth for rendering and utilities
+- **Clean Imports**: Clear dependency graph prevents circular dependencies
 
 ### Key Dependencies and Authentication
 
@@ -187,9 +235,10 @@ Current delta-neutral pairs on Aster DEX:
 
 ## Development Status
 
-- [DONE] **Step 1 Complete**: `aster_api_manager.py` (15.9KB) - unified API manager with comprehensive functionality
-- [DONE] **Step 2 Complete**: `strategy_logic.py` (17.1KB) - pure computational strategy logic with leverage validation
-- [DONE] **Step 3 Complete**: `delta_neutral_bot.py` (33.4KB) - full terminal UI and orchestration
+- [DONE] **Step 1 Complete**: `aster_api_manager.py` (931 lines) - unified API manager with analysis methods
+- [DONE] **Step 2 Complete**: `strategy_logic.py` (518 lines) - pure computational strategy logic
+- [DONE] **Step 3 Complete**: `delta_neutral_bot.py` (1,004 lines) - orchestration and interactive workflows
+- [DONE] **Refactoring Complete**: Modular architecture with 3 supporting modules (ui_renderers.py, cli_commands.py, utils.py)
 
 ### Additional Components
 - [READY] **Docker Support**: `Dockerfile` and `docker-compose.yml` for containerized deployment
@@ -218,30 +267,30 @@ Current delta-neutral pairs on Aster DEX:
 - **Comprehensive Testing**: 45+ unit tests covering core functionality and CLI commands
 - **Documentation**: Complete setup and usage guides in README.md
 
-### Recent Architectural Enhancements
+### Refactoring Summary (Latest Enhancement)
 
-**Modular Rendering System:**
-- **Common Functions**: 6 reusable rendering functions eliminate code duplication
-  - `render_funding_rates_table()`: Funding rates with effective APR column
-  - `render_perpetual_positions_table()`: Perpetual positions with % PnL
-  - `render_portfolio_summary()`: Portfolio balances summary
-  - `render_delta_neutral_positions()`: Delta-neutral analysis
-  - `render_spot_balances()`: Spot asset balances
-  - `render_opportunities()`: Investment opportunities
-- **DRY Principle**: Single source of truth for table formatting
-- **Consistent UI**: Identical formatting across CLI and dashboard
+**Code Organization:**
+- **Main Module Reduction**: Reduced `delta_neutral_bot.py` from 1,964 to 1,004 lines (49% reduction)
+- **New Supporting Modules**: Created 3 focused modules for shared functionality
+  - `ui_renderers.py` (319 lines) - 8 rendering functions
+  - `cli_commands.py` (497 lines) - 10 CLI command functions
+  - `utils.py` (30 lines) - Shared utilities
+- **Analysis Methods**: Moved `perform_funding_analysis()` and `perform_health_check_analysis()` to `aster_api_manager.py`
+- **Zero Duplication**: Eliminated all duplicate code (e.g., `_truncate()` function)
+
+**Architecture Improvements:**
+- **Separation of Concerns**: Each module has a single, well-defined responsibility
+- **DRY Principle**: Single source of truth for rendering, CLI commands, and utilities
+- **Reusability**: Rendering and CLI functions can be imported anywhere
+- **Testability**: Pure functions with clear boundaries enable comprehensive testing
+- **Maintainability**: Changes isolated to specific modules without cascading effects
+- **Clean Dependencies**: No circular imports, clear dependency graph
 
 **Enhanced Features:**
 - **Effective APR**: Shows APR/2 for 1x leverage delta-neutral strategies
 - **Percentage PnL**: Real-time percentage calculations for perpetual positions
-- **Compact Layout**: Optimized dashboard spacing for better information density
-- **Consistent Terminology**: Unified "perpetual" naming throughout codebase
-- **Error Suppression**: Improved API error handling during price discovery
-
-**Quality Improvements:**
+- **Consistent Formatting**: Identical table rendering across CLI and dashboard
 - **Cross-Platform**: Enhanced Windows compatibility with ASCII-only output
-- **Session Management**: Proper async cleanup and resource management
-- **Test Coverage**: Comprehensive unit tests for all CLI functionality
-- **Code Quality**: Eliminated duplicate rendering code across 1400+ lines
+- **Error Handling**: Improved API error suppression during price discovery
 
 Refer to `mega_plan.md` for detailed implementation specifications and `README.md` for usage instructions.
