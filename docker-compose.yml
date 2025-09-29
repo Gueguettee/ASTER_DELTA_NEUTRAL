@@ -15,4 +15,7 @@ services:
       - ./delta_neutral_bot.py:/app/delta_neutral_bot.py
       - ./aster_api_manager.py:/app/aster_api_manager.py
       - ./strategy_logic.py:/app/strategy_logic.py
+      - ./ui_renderers.py:/app/ui_renderers.py
+      - ./cli_commands.py:/app/cli_commands.py
+      - ./utils.py:/app/utils.py
       - ./ASTER_codes:/app/ASTER_codes
