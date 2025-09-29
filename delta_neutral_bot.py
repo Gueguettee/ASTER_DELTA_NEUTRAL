@@ -1298,7 +1298,7 @@ def render_funding_analysis_results(analysis_result: Dict[str, Any]):
     print(f"{Style.DIM}- Funding is paid every 8 hours at 00:00, 08:00, and 16:00 UTC.")
     print(f"{Style.DIM}- Effective Position Value = Spot Value + Abs(Perp Notional) + PnL.")
     print(f"{Style.DIM}- Fee Coverage Progress shows how close the funding has come to paying")
-    print(f"{Style.DIM}  for the estimated 0.135% in total entry/exit trading fees.")
+    print(f"{Style.DIM}  for the estimated 0.135% in total entry+exit trading fees: ([0.1% spot market]/2 + [0.035% perp market]/2) X 2.")
     print(f"{Style.DIM}- This analysis does not account for price spreads.{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}-------------------------------------------{Style.RESET_ALL}")
 
