@@ -50,6 +50,7 @@ class DashboardApp:
         self.refresh_interval = 30  # seconds
         self.is_test_run = is_test_run
         self.interactive_mode = False  # Flag to pause auto-refresh during user interactions
+        self.is_standalone_workflow = False
 
         # State variables to hold dashboard data
         self.last_updated = "Never"
@@ -57,7 +58,7 @@ class DashboardApp:
         self.positions = []
         self.spot_balances = []
         self.opportunities = []
-        self.log_messages = deque(maxlen=3)  # Store last 3 log messages
+        self.log_messages = deque(maxlen=5)  # Store last 5 log messages
         self.perp_margin_balance = 0.0
         self.perp_usdt_balance = 0.0
         self.perp_usdc_balance = 0.0
@@ -281,152 +282,98 @@ class DashboardApp:
     async def _open_position_workflow(self):
         """Guides the user through opening a new delta-neutral position."""
         self._add_log("Starting 'Open Position' workflow...")
-        # 1. Fetch all opportunities and their required data (prices, filters) concurrently
-        all_opportunities = await self.api_manager.discover_delta_neutral_pairs()
-        existing_dn_symbols = {p.get('symbol') for p in self.positions if p.get('is_delta_neutral')}
-        self.opportunities = [opp for opp in all_opportunities if opp not in existing_dn_symbols]
-
-        if not self.opportunities:
-            self._add_log(f"{Fore.YELLOW}No new opportunities available to open a position.{Style.RESET_ALL}")
-            return
-
-        self._add_log(f"Fetching data for {len(self.opportunities)} opportunities...")
-        tasks = []
-        for opp in self.opportunities:
-            tasks.append(self.api_manager.get_spot_book_ticker(opp))
-            tasks.append(self.api_manager.get_perp_symbol_filter(opp, 'MIN_NOTIONAL'))
-            tasks.append(self.api_manager.get_perp_symbol_filter(opp, 'LOT_SIZE'))
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        opportunity_data = {}
-        for i, opp in enumerate(self.opportunities):
-            price_res, min_notional_res, lot_size_res = results[i*3], results[i*3 + 1], results[i*3 + 2]
-            if not isinstance(price_res, Exception) and price_res.get('bidPrice'):
-                opportunity_data[opp] = {
-                    'price': float(price_res['bidPrice']),
-                    'min_notional_filter': min_notional_res if not isinstance(min_notional_res, Exception) else None,
-                    'lot_size_filter': lot_size_res if not isinstance(lot_size_res, Exception) else None
-                }
-
         try:
-            # 2. Ask user to select a symbol
+            # 1. Select Symbol
+            all_opportunities = await self.api_manager.discover_delta_neutral_pairs()
+            if not all_opportunities:
+                self._add_log(f"{Fore.YELLOW}No new opportunities available to open a position.{Style.RESET_ALL}")
+                return
+
             print("\n" + Fore.CYAN + "Please select a symbol to open a position (or enter 'x' to cancel):" + Style.RESET_ALL)
-            for i, opp in enumerate(self.opportunities):
-                price_str = f"${opportunity_data.get(opp, {}).get('price', 0):,.2f}"
-                print(f"[{i+1}] {opp:<12} (Price: {price_str})")
+            for i, opp in enumerate(all_opportunities):
+                print(f"[{i+1}] {opp}")
             
             selection = await self._get_user_input("Enter the number of the symbol: ")
             if selection.strip().lower() == 'x': raise KeyboardInterrupt
+            selected_symbol = all_opportunities[int(selection) - 1]
 
-            selected_symbol = self.opportunities[int(selection) - 1]
-            data = opportunity_data.get(selected_symbol)
-            if not data:
-                self._add_log(f"{Fore.RED}Could not retrieve cached data for {selected_symbol}. Aborting.{Style.RESET_ALL}")
-                return
-            spot_price = data['price']
+            # 2. Get Capital Input & Calculate Minimums
+            perp_balance = self.perp_margin_balance
+            spot_balance = self.spot_usdt_balance
+            max_capital = min(spot_balance, perp_balance)
 
-            # Set leverage to 1x for delta-neutral strategy BEFORE asking for capital
-            self._add_log(f"Setting leverage to 1x for {selected_symbol}...")
-            leverage_set_successfully = await self.api_manager.set_leverage(selected_symbol, 1)
+            # Fetch filters to calculate true minimum notional
+            min_notional_filter, lot_size_filter, spot_price_data = await asyncio.gather(
+                self.api_manager.get_perp_symbol_filter(selected_symbol, 'MIN_NOTIONAL'),
+                self.api_manager.get_perp_symbol_filter(selected_symbol, 'LOT_SIZE'),
+                self.api_manager.get_spot_book_ticker(selected_symbol)
+            )
+            spot_price = float(spot_price_data['bidPrice'])
 
-            if leverage_set_successfully:
-                success_message = f"{Fore.GREEN}✓ Leverage successfully set to 1x for {selected_symbol}.{Style.RESET_ALL}"
-                self._add_log(success_message)
-                print(success_message)
-            else:
-                error_message = f"{Fore.RED}CRITICAL: Failed to set leverage to 1x for {selected_symbol}. Aborting trade for safety.{Style.RESET_ALL}"
-                self._add_log(error_message)
-                print(error_message)
-                return  # Abort the workflow
-
-            # Check if there's already a short position for this symbol
-            existing_short = next((p for p in self.raw_perp_positions
-                                 if p.get('symbol') == selected_symbol and float(p.get('positionAmt', 0)) < 0), None)
-            if existing_short:
-                self._add_log(f"{Fore.RED}Error: Cannot open position for {selected_symbol}. " +
-                             f"Already have a short position: {existing_short.get('positionAmt')} {Style.RESET_ALL}")
-                return
-
-            # 3. Pre-validate available capital
-            max_capital = min(self.spot_usdt_balance, self.perp_margin_balance)
-            min_notional_from_filter = float(data['min_notional_filter'].get('notional', 0)) if data['min_notional_filter'] else 0.0
-            min_qty_from_filter = float(data['lot_size_filter'].get('minQty', 0)) if data['lot_size_filter'] else 0.0
+            min_notional_from_filter = float(min_notional_filter.get('notional', 0)) if min_notional_filter else 0.0
+            min_qty_from_filter = float(lot_size_filter.get('minQty', 0)) if lot_size_filter else 0.0
             min_notional_from_qty = min_qty_from_filter * spot_price
             true_min_notional = max(min_notional_from_filter, min_notional_from_qty)
 
-            if true_min_notional > 0 and max_capital < true_min_notional:
-                self._add_log(f"{Fore.RED}Error: Insufficient capital for {selected_symbol}. Have ${max_capital:.2f}, need minimum ${true_min_notional:.2f}.{Style.RESET_ALL}")
-                return
+            # Add a small buffer and round up for a clean user prompt
+            display_min_notional = math.ceil(true_min_notional + 1.0)
 
-            # 4. Ask for capital
-            prompt = f"Enter USD capital for {selected_symbol} (max: ${max_capital:.2f}, or 'x' to cancel): "
-            if true_min_notional > 0:
-                prompt = f"Enter USD capital for {selected_symbol} (min: ${true_min_notional:.2f}, max: ${max_capital:.2f}, or 'x' to cancel): "
-            
+            prompt = f"Enter USD capital for {selected_symbol} (min: ${display_min_notional:.2f}, max: ${max_capital:.2f}, or 'x' to cancel): "
             capital_str = await self._get_user_input(prompt)
             if capital_str.strip().lower() == 'x': raise KeyboardInterrupt
-
             capital_to_deploy = float(capital_str)
-            if capital_to_deploy > max_capital or (true_min_notional > 0 and capital_to_deploy < true_min_notional):
+
+            if capital_to_deploy > max_capital or capital_to_deploy < true_min_notional:
                 self._add_log(f"{Fore.RED}Error: Invalid amount. Please enter a value between ${true_min_notional:.2f} and ${max_capital:.2f}.{Style.RESET_ALL}")
                 return
 
-            # 5. Calculate ideal position size
-            base_asset = selected_symbol.replace('USDT', '')
-            existing_spot_quantity = sum(float(b.get('free', '0')) for b in self.spot_balances if b.get('asset') == base_asset)
+            # 3. Perform Dry Run to get trade details
+            self._add_log("Calculating trade details (dry run)...")
+            trade_plan = await self.api_manager.prepare_and_execute_dn_position(selected_symbol, capital_to_deploy, dry_run=True)
 
-            sizing = self.logic.calculate_position_size(
-                total_usd_capital=capital_to_deploy,
-                spot_price=spot_price,
-                existing_spot_usd=(existing_spot_quantity * spot_price)
-            )
-
-            # 6. Adjust quantities based on perpetuals lot size filter (the constraint)
-            ideal_perp_qty = sizing['total_perp_quantity_to_short']
-            final_perp_qty = ideal_perp_qty
-
-            lot_size_filter = data.get('lot_size_filter')
-            if lot_size_filter and lot_size_filter.get('stepSize'):
-                step_size_str = lot_size_filter['stepSize']
-                precision = abs(Decimal(step_size_str).as_tuple().exponent)
-                final_perp_qty = self._truncate(ideal_perp_qty, precision)
-
-            # 7. Adjust spot side to match the final perpetual quantity
-            # The total spot holding should equal the total perp holding
-            spot_qty_to_buy = max(0, final_perp_qty - existing_spot_quantity)
-            spot_capital_to_buy = spot_qty_to_buy * spot_price
-
-            # 9. Show final confirmation with adjusted values
-            print("\n" + Fore.YELLOW + "--- FINAL CONFIRMATION (ADJUSTED FOR LOT SIZE) ---" + Style.RESET_ALL)
-            print(f"Symbol: {selected_symbol}, Initial Capital: ${capital_to_deploy:.2f}")
-            print(f"Action: Open delta-neutral position via MARKET orders at 1x leverage.")
-            print(Fore.MAGENTA + f"Perp Lot Size Filter (stepSize): {lot_size_filter.get('stepSize') if lot_size_filter else 'N/A'}" + Style.RESET_ALL)
-            print(f"Ideal Perp Qty:   {ideal_perp_qty:.8f}")
-            print(f"Final Perp Qty:   {final_perp_qty:.8f}")
-            print("-"*40)
-            if (existing_spot_quantity * spot_price) > 0:
-                print(Fore.CYAN + f"Utilizing Existing Spot: {existing_spot_quantity:.8f} {base_asset} (${(existing_spot_quantity * spot_price):.2f})" + Style.RESET_ALL)
-            print(f"Spot BUY Qty: {spot_qty_to_buy:.8f} (${spot_capital_to_buy:.2f})")
-            print(f"Perp SELL Qty: {final_perp_qty:.8f} (${final_perp_qty * spot_price:.2f})")
-
-            if final_perp_qty <= 0:
-                self._add_log(f"{Fore.RED}Error: Final perpetual quantity is zero or less after rounding. Cannot proceed.{Style.RESET_ALL}")
+            if not trade_plan.get('success'):
+                error_message = f"{Fore.RED}Could not create trade plan: {trade_plan.get('message')}{Style.RESET_ALL}"
+                self._add_log(error_message)
+                if self.is_standalone_workflow:
+                    print(error_message)
                 return
+
+            # 4. Show Confirmation
+            details = trade_plan['details']
+            base_asset = selected_symbol.replace('USDT', '')
+            print("\n" + Fore.YELLOW + "--- CONFIRMATION (ADJUSTED FOR LOT SIZE) ---" + Style.RESET_ALL)
+            print(f"Symbol: {details['symbol']}, Initial Capital: ${details['capital_to_deploy']:.2f}")
+            print(f"Action: Open delta-neutral position via MARKET orders at 1x leverage.")
+            print(Fore.MAGENTA + f"Perp Lot Size Filter (stepSize): {details['lot_size_filter'].get('stepSize') if details['lot_size_filter'] else 'N/A'}" + Style.RESET_ALL)
+            print(f"Ideal Perp Qty:   {details['ideal_perp_qty']:.8f}")
+            print(f"Final Perp Qty:   {details['final_perp_qty']:.8f}")
+            print("-"*40)
+            if (details['existing_spot_quantity'] * details['spot_price']) > 0:
+                print(Fore.CYAN + f"Utilizing Existing Spot: {details['existing_spot_quantity']:.8f} {base_asset} (${(details['existing_spot_quantity'] * details['spot_price']):.2f})" + Style.RESET_ALL)
+            print(f"Spot BUY Qty: {details['spot_qty_to_buy']:.8f} (${details['spot_capital_to_buy']:.2f})")
+            print(f"Perp SELL Qty: {details['final_perp_qty']:.8f} (${details['final_perp_qty'] * details['spot_price']:.2f})")
 
             confirm = await self._get_user_input("Press Enter to confirm (or enter 'x' to cancel): ")
             if confirm.strip().lower() == 'x' or confirm.strip() != '':
                 self._add_log("Trade execution cancelled by user.")
                 return
 
-            # 10. Execute trades with final, adjusted quantities
-            self._add_log("Executing trades with adjusted quantities...")
-            if spot_capital_to_buy > 1.0: # Only place spot order if it's worth more than $1
-                await self.api_manager.place_spot_buy_market_order(symbol=selected_symbol, quote_quantity=str(spot_capital_to_buy))
-            await self.api_manager.place_perp_market_order(symbol=selected_symbol, quantity=str(final_perp_qty), side='SELL')
-            self._add_log(f"{Fore.GREEN}Successfully opened position for {selected_symbol}.{Style.RESET_ALL}")
+            # 5. Execute Trade
+            self._add_log("Executing trades...")
+            exec_result = await self.api_manager.prepare_and_execute_dn_position(selected_symbol, capital_to_deploy, dry_run=False)
 
-            # Wait 1 second then refresh data to show the new position
+            if exec_result.get('success'):
+                success_message = f"{Fore.GREEN}{exec_result.get('message')}{Style.RESET_ALL}"
+                self._add_log(success_message)
+                if self.is_standalone_workflow:
+                    print(success_message)
+            else:
+                error_message = f"{Fore.RED}Execution failed: {exec_result.get('message')}{Style.RESET_ALL}"
+                self._add_log(error_message)
+                if self.is_standalone_workflow:
+                    print(error_message)
+
+            # Wait and refresh data
             self._add_log("Refreshing data to show new position...")
             await asyncio.sleep(1)
             await self._fetch_and_update_data()
@@ -442,7 +389,10 @@ class DashboardApp:
         dn_positions = [p for p in self.positions if p.get('is_delta_neutral')]
 
         if not dn_positions:
-            self._add_log(f"{Fore.YELLOW}No delta-neutral positions available to close.{Style.RESET_ALL}")
+            message = f"{Fore.YELLOW}No delta-neutral positions available to close.{Style.RESET_ALL}"
+            self._add_log(message)
+            if self.is_standalone_workflow:
+                print(message)
             return
 
         try:
@@ -468,14 +418,20 @@ class DashboardApp:
                 self._add_log("Close position cancelled by user.")
                 return
 
-            # 3. Execute closing trades
+            # 3. Execute closing trades via the centralized method
             self._add_log(f"Closing position for {symbol_to_close}...")
-            perp_quantity = abs(selected_position.get('perp_position', 0))
-            side_to_close = 'BUY' if selected_position.get('perp_position', 0) < 0 else 'SELL'
+            close_result = await self.api_manager.execute_dn_position_close(symbol_to_close)
 
-            await self.api_manager.close_perp_position(symbol=symbol_to_close, quantity=str(perp_quantity), side_to_close=side_to_close)
-            await self.api_manager.place_spot_sell_market_order(symbol=symbol_to_close, base_quantity=str(selected_position.get('spot_balance', 0)))
-            self._add_log(f"{Fore.GREEN}Successfully closed position for {symbol_to_close}.{Style.RESET_ALL}")
+            if close_result.get('success'):
+                success_message = f"{Fore.GREEN}{close_result.get('message')}{Style.RESET_ALL}"
+                self._add_log(success_message)
+                if self.is_standalone_workflow:
+                    print(success_message)
+            else:
+                error_message = f"{Fore.RED}Failed to close position: {close_result.get('message')}{Style.RESET_ALL}"
+                self._add_log(error_message)
+                if self.is_standalone_workflow:
+                    print(error_message)
 
             # Wait 1 second then refresh data to show the closed position
             self._add_log("Refreshing data to show position closure...")
@@ -781,15 +737,19 @@ class DashboardApp:
         )
 
     def _render_logs(self):
-        """Renders the most recent log messages."""
+        """Renders the most recent log messages in reverse order (newest first)."""
         print(Fore.GREEN + "\n--- Logs ---" + Style.RESET_ALL)
-        if not self.log_messages:
-            print("No log messages.")
-            return
+        
+        num_messages = len(self.log_messages)
+        max_logs = self.log_messages.maxlen
 
-        for msg in self.log_messages:
-            # The message should already have color codes if needed
+        # Print the actual log messages in reverse order
+        for msg in reversed(self.log_messages):
             print(f"{msg}")
+
+        # Print placeholder lines for the remaining space
+        for _ in range(max_logs - num_messages):
+            print("[--:--:--]")
 
     def _render_menu(self):
         """Renders the main menu of available actions."""
@@ -1521,6 +1481,114 @@ async def rebalance_usdt_cli():
     finally:
         await api_manager.close()
 
+async def open_position_cli(symbol: str, capital: float, auto_confirm: bool = False):
+    """CLI function to open a new delta-neutral position."""
+    print(Fore.CYAN + f"Attempting to open a ${capital:.2f} USD position for {symbol}..." + Style.RESET_ALL)
+
+    api_manager = AsterApiManager(
+        api_user=os.getenv('API_USER'),
+        api_signer=os.getenv('API_SIGNER'),
+        api_private_key=os.getenv('API_PRIVATE_KEY'),
+        apiv1_public=os.getenv('APIV1_PUBLIC_KEY'),
+        apiv1_private=os.getenv('APIV1_PRIVATE_KEY')
+    )
+
+    try:
+        # 1. Perform Dry Run to get trade details
+        print("Calculating trade details (dry run)...")
+        trade_plan = await api_manager.prepare_and_execute_dn_position(symbol, capital, dry_run=True)
+
+        if not trade_plan.get('success'):
+            error_message = trade_plan.get('message', 'No error message provided.')
+            print(f"{Fore.RED}Error: {error_message}{Style.RESET_ALL}")
+            return
+
+        # 2. Show Confirmation
+        details = trade_plan['details']
+        base_asset = symbol.replace('USDT', '')
+        print("\n" + Fore.YELLOW + "--- TRADE PLAN (ADJUSTED FOR LOT SIZE) ---" + Style.RESET_ALL)
+        print(f"Symbol: {details['symbol']}, Initial Capital: ${details['capital_to_deploy']:.2f}")
+        print(f"Action: Open delta-neutral position via MARKET orders at 1x leverage.")
+        print(Fore.MAGENTA + f"Perp Lot Size Filter (stepSize): {details['lot_size_filter'].get('stepSize') if details['lot_size_filter'] else 'N/A'}" + Style.RESET_ALL)
+        print(f"Final Perp Qty:   {details['final_perp_qty']:.8f}")
+        print("-"*40)
+        if (details['existing_spot_quantity'] * details['spot_price']) > 0:
+            print(Fore.CYAN + f"Utilizing Existing Spot: {details['existing_spot_quantity']:.8f} {base_asset} (${(details['existing_spot_quantity'] * details['spot_price']):.2f})" + Style.RESET_ALL)
+        print(f"Spot BUY Qty: {details['spot_qty_to_buy']:.8f} (${details['spot_capital_to_buy']:.2f})")
+        print(f"Perp SELL Qty: {details['final_perp_qty']:.8f} (${details['final_perp_qty'] * details['spot_price']:.2f})")
+
+        # 3. Confirm and Execute
+        if not auto_confirm:
+            confirm = input("\nPress Enter to confirm (or enter 'x' to cancel): ")
+            if confirm.strip().lower() == 'x' or confirm.strip() != '':
+                print("Trade execution cancelled by user.")
+                return
+        
+        print("\nExecuting trades...")
+        exec_result = await api_manager.prepare_and_execute_dn_position(symbol, capital, dry_run=False)
+
+        if exec_result.get('success'):
+            print(f"{Fore.GREEN}{exec_result.get('message')}{Style.RESET_ALL}")
+            print(f"Spot Order: {exec_result.get('spot_order')}")
+            print(f"Perp Order: {exec_result.get('perp_order')}")
+        else:
+            print(f"{Fore.RED}Execution failed: {exec_result.get('message')}{Style.RESET_ALL}")
+
+    finally:
+        await api_manager.close()
+
+async def run_interactive_open_workflow():
+    """Helper to run the interactive open position workflow from the CLI."""
+    app = DashboardApp()
+    app.is_standalone_workflow = True
+    # Manually initialize the app state before running the workflow
+    print("Initializing app and fetching market data...")
+    await app._fetch_and_update_data()
+    app.interactive_mode = True # Ensure it behaves like the interactive command
+    await app._open_position_workflow()
+    await app.api_manager.close()
+
+async def close_position_cli(symbol: str, auto_confirm: bool = False):
+    """CLI function to close a delta-neutral position."""
+    print(Fore.CYAN + f"Attempting to close position for {symbol}..." + Style.RESET_ALL)
+
+    api_manager = AsterApiManager(
+        api_user=os.getenv('API_USER'),
+        api_signer=os.getenv('API_SIGNER'),
+        api_private_key=os.getenv('API_PRIVATE_KEY'),
+        apiv1_public=os.getenv('APIV1_PUBLIC_KEY'),
+        apiv1_private=os.getenv('APIV1_PRIVATE_KEY')
+    )
+
+    try:
+        if not auto_confirm:
+            confirm = input(f"Are you sure you want to close the position for {symbol}? (yes/no): ").strip().lower()
+            if confirm != 'yes':
+                print("Operation cancelled.")
+                return
+
+        print(f"Executing closing trades for {symbol}...")
+        close_result = await api_manager.execute_dn_position_close(symbol)
+
+        if close_result.get('success'):
+            print(f"{Fore.GREEN}{close_result.get('message')}{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.RED}Failed to close position: {close_result.get('message')}{Style.RESET_ALL}")
+
+    finally:
+        await api_manager.close()
+
+async def run_interactive_close_workflow():
+    """Helper to run the interactive close position workflow from the CLI."""
+    app = DashboardApp()
+    # Manually initialize the app state before running the workflow
+    print("Initializing app and fetching market data...")
+    await app._fetch_and_update_data()
+    app.interactive_mode = True # Ensure it behaves like the interactive command
+    app.is_standalone_workflow = True # Ensure messages are printed to console
+    await app._close_position_workflow()
+    await app.api_manager.close()
+
 def main():
     """The main function to run the bot."""
     parser = argparse.ArgumentParser(description="Delta-Neutral Funding Rate Farming Bot")
@@ -1532,6 +1600,9 @@ def main():
     parser.add_argument('--perpetual', action='store_true', help="Show current perpetual positions with PnL analysis")
     parser.add_argument('--health-check', action='store_true', help="Perform portfolio health check for position risks")
     parser.add_argument('--rebalance', action='store_true', help="Rebalance USDT between spot and perpetual accounts 50/50")
+    parser.add_argument('--open', nargs='*', help="Open a new delta-neutral position. Runs interactively if no symbol/capital is provided.")
+    parser.add_argument('--close', nargs='?', const=True, default=None, help="Close a delta-neutral position. Runs interactively if no symbol is provided.")
+    parser.add_argument('--yes', action='store_true', help="Bypass confirmation for non-interactive commands like --open.")
     args = parser.parse_args()
 
     # Check for required environment variables
@@ -1583,6 +1654,44 @@ def main():
         except KeyboardInterrupt:
             print("\nOperation cancelled.")
         return
+
+    if args.open is not None:
+        if len(args.open) == 0:
+            # Interactive mode
+            try:
+                asyncio.run(run_interactive_open_workflow())
+            except KeyboardInterrupt:
+                print("\nOperation cancelled.")
+            return
+        elif len(args.open) == 2:
+            # Non-interactive CLI mode
+            try:
+                symbol, capital = args.open
+                asyncio.run(open_position_cli(symbol, float(capital), args.yes))
+            except (ValueError, IndexError):
+                print(f"{Fore.RED}Error: --open requires SYMBOL and CAPITAL arguments.{Style.RESET_ALL}")
+            except KeyboardInterrupt:
+                print("\nOperation cancelled.")
+            return
+        else:
+            print(f"{Fore.RED}Error: --open takes either 0 or 2 arguments (symbol and capital).{Style.RESET_ALL}")
+            return
+
+    if args.close is not None:
+        if args.close is True:
+            # Interactive mode
+            try:
+                asyncio.run(run_interactive_close_workflow())
+            except KeyboardInterrupt:
+                print("\nOperation cancelled.")
+            return
+        else:
+            # Non-interactive CLI mode
+            try:
+                asyncio.run(close_position_cli(args.close, args.yes))
+            except KeyboardInterrupt:
+                print("\nOperation cancelled.")
+            return
 
     if args.rebalance:
         try:

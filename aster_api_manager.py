@@ -562,6 +562,137 @@ class AsterApiManager:
             'analyzed_positions': analyzed_positions,
         }
 
+    async def prepare_and_execute_dn_position(self, symbol: str, capital_to_deploy: float, dry_run: bool = False) -> Dict[str, Any]:
+        """Prepares and (optionally) executes a delta-neutral position opening."""
+        trade_details = {'success': False, 'message': '', 'details': None}
+        try:
+            # 1. Fetch required data
+            spot_price_data, lot_size_filter, spot_balances, perp_account = await asyncio.gather(
+                self.get_spot_book_ticker(symbol),
+                self.get_perp_symbol_filter(symbol, 'LOT_SIZE'),
+                self.get_spot_account_balances(),
+                self.get_perp_account_info()
+            )
+            spot_price = float(spot_price_data['bidPrice'])
+
+            # Check for existing short position
+            raw_perp_positions = [p for p in perp_account.get('positions', []) if float(p.get('positionAmt', 0)) != 0]
+            existing_short = next((p for p in raw_perp_positions if p.get('symbol') == symbol and float(p.get('positionAmt', 0)) < 0), None)
+            if existing_short:
+                trade_details['message'] = f"Cannot open position. Already have a short position: {existing_short.get('positionAmt')}"
+                return trade_details
+
+            # 2. Set leverage to 1x
+            leverage_set = await self.set_leverage(symbol, 1)
+            if not leverage_set:
+                trade_details['message'] = "Failed to set leverage to 1x."
+                return trade_details
+
+            # 3. Calculate position sizes
+            base_asset = symbol.replace('USDT', '')
+            existing_spot_quantity = sum(float(b.get('free', '0')) for b in spot_balances if b.get('asset') == base_asset)
+            sizing = DeltaNeutralLogic.calculate_position_size(
+                total_usd_capital=capital_to_deploy,
+                spot_price=spot_price,
+                existing_spot_usd=(existing_spot_quantity * spot_price)
+            )
+
+            # 4. Adjust quantities based on perpetuals lot size filter
+            ideal_perp_qty = sizing['total_perp_quantity_to_short']
+            final_perp_qty = ideal_perp_qty
+            if lot_size_filter and lot_size_filter.get('stepSize'):
+                step_size_str = lot_size_filter['stepSize']
+                precision = abs(Decimal(step_size_str).as_tuple().exponent)
+                final_perp_qty = self._truncate(ideal_perp_qty, precision)
+
+            if final_perp_qty <= 0:
+                trade_details['message'] = "Final perpetual quantity is zero or less after rounding."
+                return trade_details
+
+            # 5. Adjust spot side
+            spot_qty_to_buy = max(0, final_perp_qty - existing_spot_quantity)
+            spot_capital_to_buy = spot_qty_to_buy * spot_price
+
+            # 6. Prepare details dictionary
+            details = {
+                'symbol': symbol,
+                'capital_to_deploy': capital_to_deploy,
+                'spot_price': spot_price,
+                'lot_size_filter': lot_size_filter,
+                'ideal_perp_qty': ideal_perp_qty,
+                'final_perp_qty': final_perp_qty,
+                'existing_spot_quantity': existing_spot_quantity,
+                'spot_qty_to_buy': spot_qty_to_buy,
+                'spot_capital_to_buy': spot_capital_to_buy
+            }
+            trade_details['details'] = details
+
+            if dry_run:
+                trade_details['success'] = True
+                trade_details['message'] = "Dry run successful. Trade details calculated."
+                return trade_details
+
+            # 7. Execute trades
+            exec_results = await asyncio.gather(
+                self.place_perp_market_order(symbol, str(final_perp_qty), 'SELL'),
+                self.place_spot_buy_market_order(symbol, str(spot_capital_to_buy)) if spot_capital_to_buy > 1.0 else asyncio.sleep(0),
+                return_exceptions=True
+            )
+
+            perp_result, spot_result = exec_results
+            trade_details['success'] = True
+            trade_details['message'] = f"Successfully opened position for {symbol}."
+            trade_details['perp_order'] = perp_result
+            trade_details['spot_order'] = spot_result
+            return trade_details
+
+        except Exception as e:
+            trade_details['message'] = f"Failed to open position: {e}"
+            return trade_details
+
+    async def execute_dn_position_close(self, symbol: str) -> Dict[str, Any]:
+        """Fetches position state and executes closing orders for a delta-neutral position."""
+        close_details = {'success': False, 'message': ''}
+        try:
+            # 1. Get current position state
+            portfolio_data = await self.get_comprehensive_portfolio_data()
+            if not portfolio_data:
+                close_details['message'] = "Could not retrieve portfolio data."
+                return close_details
+
+            position_to_close = next((p for p in portfolio_data.get('analyzed_positions', []) if p.get('symbol') == symbol), None)
+
+            if not position_to_close:
+                close_details['message'] = f"No position found for symbol {symbol}."
+                return close_details
+
+            # 2. Get quantities to close
+            perp_quantity = abs(position_to_close.get('perp_position', 0))
+            spot_quantity = position_to_close.get('spot_balance', 0)
+            side_to_close = 'BUY' if position_to_close.get('perp_position', 0) < 0 else 'SELL'
+
+            if perp_quantity == 0 or spot_quantity == 0:
+                close_details['message'] = f"Position for {symbol} is not a valid delta-neutral pair to close (perp or spot leg is zero)."
+                return close_details
+
+            # 3. Execute closing trades
+            exec_results = await asyncio.gather(
+                self.close_perp_position(symbol, str(perp_quantity), side_to_close),
+                self.place_spot_sell_market_order(symbol, str(spot_quantity)),
+                return_exceptions=True
+            )
+
+            perp_result, spot_result = exec_results
+            close_details['success'] = True
+            close_details['message'] = f"Successfully closed position for {symbol}."
+            close_details['perp_order'] = perp_result
+            close_details['spot_order'] = spot_result
+            return close_details
+
+        except Exception as e:
+            close_details['message'] = f"Failed to close position: {e}"
+            return close_details
+
 
     async def close(self):
         """Close the HTTP session and perpetual client session."""
