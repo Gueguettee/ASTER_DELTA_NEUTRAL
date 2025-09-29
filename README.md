@@ -40,7 +40,7 @@ This is the main application that brings the other two modules together. It orch
 - **Integration:** Initializes and manages the `AsterApiManager` and `DeltaNeutralLogic` components.
 - **Orchestration:** Runs the main application loop, periodically fetching data, feeding it to the strategy logic, and updating the dashboard.
 - **User Interface:** Renders the terminal dashboard, displaying all relevant portfolio information, open positions, and potential opportunities in a clear and organized manner.
-- **User Interaction:** Handles all keyboard inputs for refreshing data, scanning for opportunities, and executing the workflows for opening and closing positions.
+- **User Interaction:** Handles all keyboard inputs for refreshing data, analyzing paid fundings, and executing the workflows for opening and closing positions.
 
 ## Running the Application
 
@@ -119,11 +119,14 @@ python delta_neutral_bot.py --health-check
 
 # Rebalance USDT 50/50 between spot and perpetual accounts
 python delta_neutral_bot.py --rebalance
+
+# Analyze paid fundings for a specific delta-neutral position
+python delta_neutral_bot.py --analyze-fundings [SYMBOL]
 ```
 
 ### Trading Commands
 
-The `--open` and `--close` commands can be run in two modes:
+The `--open`, `--close`, and `--analyze-fundings` commands can be run in two modes:
 
 1.  **Interactive Mode:** Run the command without arguments to launch a guided workflow.
 2.  **Non-Interactive Mode:** Provide arguments directly on the command line. Use the `--yes` flag to bypass the final confirmation prompt, allowing for use in scripts.
@@ -151,6 +154,15 @@ python delta_neutral_bot.py --close BTCUSDT
 
 # Close the BTCUSDT position without a confirmation prompt
 python delta_neutral_bot.py --close BTCUSDT --yes
+
+
+# --- Analyze Paid Fundings ---
+
+# Launch the interactive workflow to select a position to analyze
+python delta_neutral_bot.py --analyze-fundings
+
+# Analyze the BTCUSDT position directly
+python delta_neutral_bot.py --analyze-fundings BTCUSDT
 ```
 
 ### CLI Features
