@@ -11,6 +11,8 @@ from datetime import datetime
 from collections import deque
 from dotenv import load_dotenv
 from colorama import init, Fore, Style
+import math
+from decimal import Decimal
 
 # Platform-specific imports for non-blocking input
 try:
@@ -63,6 +65,15 @@ class DashboardApp:
         self.spot_usdt_balance = 0.0
         self.raw_perp_positions = []
         self.funding_rate_cache = None  # To hold on-demand funding rate scan results
+
+    def _truncate(self, value: float, precision: int) -> float:
+        """Truncates a float to a given precision without rounding."""
+        if precision < 0:
+            precision = 0
+        if precision == 0:
+            return math.floor(value)
+        factor = 10.0 ** precision
+        return math.floor(value * factor) / factor
 
     async def run(self):
         """Main entry point to start the application."""
@@ -127,100 +138,28 @@ class DashboardApp:
 
     async def _fetch_and_update_data(self):
         """Fetch all necessary data from the API manager and update state."""
-        self._add_log("Fetching latest data from Aster DEX...")
+        self._add_log("Fetching latest portfolio data from Aster DEX...")
         
-        # Using asyncio.gather to fetch data and pre-cache exchange info concurrently
-        results = await asyncio.gather(
-            self.api_manager.analyze_current_positions(),
-            self.api_manager.get_spot_account_balances(),
-            self.api_manager.get_perp_account_info(),
-            self.api_manager._get_spot_exchange_info(force_refresh=True),
-            self.api_manager._get_perp_exchange_info(force_refresh=True),
-            return_exceptions=True
-        )
+        portfolio_data = await self.api_manager.get_comprehensive_portfolio_data()
 
-        # Process analysis results
-        analysis_results = results[0] if isinstance(results[0], dict) else {}
-        self.positions = list(analysis_results.values())
+        if not portfolio_data:
+            self._add_log(f"{Fore.RED}Failed to fetch comprehensive portfolio data.{Style.RESET_ALL}")
+            return
 
-        # Process spot balances
-        if isinstance(results[1], list):
-            self.spot_balances = [b for b in results[1] if float(b.get('free', 0)) > 0]
-            self.spot_usdt_balance = next((float(b.get('free', 0)) for b in self.spot_balances if b.get('asset') == 'USDT'), 0.0)
-            
-            # Fetch USD values for non-stablecoin spot balances
-            stablecoins = {'USDT', 'USDC', 'USDF'}
-            non_stable_balances = [b for b in self.spot_balances if b.get('asset') not in stablecoins]
-            if non_stable_balances:
-                price_tasks = [self.api_manager.get_spot_book_ticker(f"{b['asset']}USDT") for b in non_stable_balances]
-                price_results = await asyncio.gather(*price_tasks, return_exceptions=True)
-                for i, balance in enumerate(non_stable_balances):
-                    price_data = price_results[i]
-                    if not isinstance(price_data, Exception) and price_data.get('bidPrice'):
-                        price = float(price_data['bidPrice'])
-                        balance['value_usd'] = float(balance.get('free', 0)) * price
-                    else:
-                        balance['value_usd'] = 0.0
-        else:
-            self._add_log(f"{Fore.RED}Failed to fetch spot balances: {results[1]}{Style.RESET_ALL}")
+        # Assign data from the comprehensive payload to the dashboard state
+        self.positions = portfolio_data.get('analyzed_positions', [])
+        self.spot_balances = portfolio_data.get('spot_balances', [])
+        self.raw_perp_positions = portfolio_data.get('raw_perp_positions', [])
+        perp_account_info = portfolio_data.get('perp_account_info', {})
 
-        # Process perpetual account info
-        if isinstance(results[2], dict):
-            perp_account_info = results[2]
-            
-            # Extract individual stablecoin balances from the 'assets' list
-            assets = perp_account_info.get('assets', [])
-            self.perp_usdt_balance = next((float(a.get('walletBalance', 0)) for a in assets if a.get('asset') == 'USDT'), 0.0)
-            self.perp_usdc_balance = next((float(a.get('walletBalance', 0)) for a in assets if a.get('asset') == 'USDC'), 0.0)
-            self.perp_usdf_balance = next((float(a.get('walletBalance', 0)) for a in assets if a.get('asset') == 'USDF'), 0.0)
-
-            # Calculate the total margin balance as the sum of the stablecoin balances
-            self.perp_margin_balance = self.perp_usdt_balance + self.perp_usdc_balance + self.perp_usdf_balance
-
-            self.raw_perp_positions = [p for p in perp_account_info.get('positions', []) if float(p.get('positionAmt', 0)) != 0]
-
-            # Fetch live mark prices for perpetual positions
-            if self.raw_perp_positions:
-                price_tasks = [self.api_manager.get_perp_book_ticker(p['symbol']) for p in self.raw_perp_positions]
-                price_results = await asyncio.gather(*price_tasks, return_exceptions=True)
-                for i, pos in enumerate(self.raw_perp_positions):
-                    price_data = price_results[i]
-                    if not isinstance(price_data, Exception) and price_data.get('bidPrice'):
-                        pos['markPrice'] = (float(price_data['bidPrice']) + float(price_data['askPrice'])) / 2
-        else:
-            self._add_log(f"{Fore.RED}Failed to fetch perp account info: {results[2]}{Style.RESET_ALL}")
-
-        # Identify and add spot-only positions to the analysis
-        symbols_with_perp = {pos.get('symbol') for pos in self.positions}
-        stablecoins = {'USDT', 'USDC', 'USDF'}
-        spot_only_assets = [
-            {'asset': b.get('asset'), 'symbol': f"{b.get('asset')}USDT", 'balance': float(b.get('free', 0))}
-            for b in self.spot_balances if b.get('asset') not in stablecoins and f"{b.get('asset')}USDT" not in symbols_with_perp
-        ]
+        # Extract summary values from the fetched data
+        self.spot_usdt_balance = next((float(b.get('free', 0)) for b in self.spot_balances if b.get('asset') == 'USDT'), 0.0)
         
-        if spot_only_assets:
-            price_tasks = [self.api_manager.get_spot_book_ticker(asset['symbol']) for asset in spot_only_assets]
-            price_results = await asyncio.gather(*price_tasks, return_exceptions=True)
-            for i, asset_info in enumerate(spot_only_assets):
-                price_data = price_results[i]
-                if not isinstance(price_data, Exception) and price_data.get('bidPrice'):
-                    price = float(price_data['bidPrice'])
-                    self.positions.append({
-                        'symbol': asset_info['symbol'], 'spot_balance': asset_info['balance'], 'perp_position': 0.0,
-                        'is_delta_neutral': False, 'imbalance_pct': 100.0, 'net_delta': asset_info['balance'],
-                        'position_value_usd': asset_info['balance'] * price, 'leverage': 'N/A', 'current_apr': 'N/A'
-                    })
-
-        # Fetch current funding rates for delta-neutral positions
-        dn_positions = [p for p in self.positions if p.get('is_delta_neutral')]
-        if dn_positions:
-            rate_tasks = [self.api_manager.get_funding_rate_history(p['symbol'], limit=1) for p in dn_positions]
-            rate_results = await asyncio.gather(*rate_tasks, return_exceptions=True)
-            for i, pos in enumerate(dn_positions):
-                rate_data = rate_results[i]
-                if not isinstance(rate_data, Exception) and rate_data:
-                    latest_rate = float(rate_data[0].get('fundingRate', 0))
-                    pos['current_apr'] = latest_rate * 3 * 365 * 100
+        assets = perp_account_info.get('assets', [])
+        self.perp_usdt_balance = next((float(a.get('walletBalance', 0)) for a in assets if a.get('asset') == 'USDT'), 0.0)
+        self.perp_usdc_balance = next((float(a.get('walletBalance', 0)) for a in assets if a.get('asset') == 'USDC'), 0.0)
+        self.perp_usdf_balance = next((float(a.get('walletBalance', 0)) for a in assets if a.get('asset') == 'USDF'), 0.0)
+        self.perp_margin_balance = self.perp_usdt_balance + self.perp_usdc_balance + self.perp_usdf_balance
 
         # Fetch available opportunities for new positions
         try:
@@ -387,6 +326,28 @@ class DashboardApp:
                 return
             spot_price = data['price']
 
+            # Set leverage to 1x for delta-neutral strategy BEFORE asking for capital
+            self._add_log(f"Setting leverage to 1x for {selected_symbol}...")
+            leverage_set_successfully = await self.api_manager.set_leverage(selected_symbol, 1)
+
+            if leverage_set_successfully:
+                success_message = f"{Fore.GREEN}✓ Leverage successfully set to 1x for {selected_symbol}.{Style.RESET_ALL}"
+                self._add_log(success_message)
+                print(success_message)
+            else:
+                error_message = f"{Fore.RED}CRITICAL: Failed to set leverage to 1x for {selected_symbol}. Aborting trade for safety.{Style.RESET_ALL}"
+                self._add_log(error_message)
+                print(error_message)
+                return  # Abort the workflow
+
+            # Check if there's already a short position for this symbol
+            existing_short = next((p for p in self.raw_perp_positions
+                                 if p.get('symbol') == selected_symbol and float(p.get('positionAmt', 0)) < 0), None)
+            if existing_short:
+                self._add_log(f"{Fore.RED}Error: Cannot open position for {selected_symbol}. " +
+                             f"Already have a short position: {existing_short.get('positionAmt')} {Style.RESET_ALL}")
+                return
+
             # 3. Pre-validate available capital
             max_capital = min(self.spot_usdt_balance, self.perp_margin_balance)
             min_notional_from_filter = float(data['min_notional_filter'].get('notional', 0)) if data['min_notional_filter'] else 0.0
@@ -411,36 +372,58 @@ class DashboardApp:
                 self._add_log(f"{Fore.RED}Error: Invalid amount. Please enter a value between ${true_min_notional:.2f} and ${max_capital:.2f}.{Style.RESET_ALL}")
                 return
 
-            # 5. Calculate position size
+            # 5. Calculate ideal position size
             base_asset = selected_symbol.replace('USDT', '')
             existing_spot_quantity = sum(float(b.get('free', '0')) for b in self.spot_balances if b.get('asset') == base_asset)
-            existing_spot_usd = existing_spot_quantity * spot_price
 
             sizing = self.logic.calculate_position_size(
                 total_usd_capital=capital_to_deploy,
                 spot_price=spot_price,
-                existing_spot_usd=existing_spot_usd
+                existing_spot_usd=(existing_spot_quantity * spot_price)
             )
-            
-            # 6. Show confirmation
-            print("\n" + Fore.YELLOW + "--- CONFIRMATION ---" + Style.RESET_ALL)
-            print(f"Symbol: {selected_symbol}, Total Value: ${capital_to_deploy:.2f}")
-            print(f"Action: Open delta-neutral position via MARKET orders.")
-            if sizing['existing_spot_usd_utilized'] > 0:
-                print(Fore.CYAN + f"Utilizing Existing Spot: ${sizing['existing_spot_usd_utilized']:.2f}" + Style.RESET_ALL)
-            print(f"New Spot BUY: ${sizing['new_spot_capital_required']:.2f} (Qty: {sizing['spot_quantity_to_buy']:.6f})")
-            print(f"Perp SELL: ${sizing['perp_capital_required']:.2f} (Qty: {sizing['total_perp_quantity_to_short']:.6f})")
-            
+
+            # 6. Adjust quantities based on perpetuals lot size filter (the constraint)
+            ideal_perp_qty = sizing['total_perp_quantity_to_short']
+            final_perp_qty = ideal_perp_qty
+
+            lot_size_filter = data.get('lot_size_filter')
+            if lot_size_filter and lot_size_filter.get('stepSize'):
+                step_size_str = lot_size_filter['stepSize']
+                precision = abs(Decimal(step_size_str).as_tuple().exponent)
+                final_perp_qty = self._truncate(ideal_perp_qty, precision)
+
+            # 7. Adjust spot side to match the final perpetual quantity
+            # The total spot holding should equal the total perp holding
+            spot_qty_to_buy = max(0, final_perp_qty - existing_spot_quantity)
+            spot_capital_to_buy = spot_qty_to_buy * spot_price
+
+            # 9. Show final confirmation with adjusted values
+            print("\n" + Fore.YELLOW + "--- FINAL CONFIRMATION (ADJUSTED FOR LOT SIZE) ---" + Style.RESET_ALL)
+            print(f"Symbol: {selected_symbol}, Initial Capital: ${capital_to_deploy:.2f}")
+            print(f"Action: Open delta-neutral position via MARKET orders at 1x leverage.")
+            print(Fore.MAGENTA + f"Perp Lot Size Filter (stepSize): {lot_size_filter.get('stepSize') if lot_size_filter else 'N/A'}" + Style.RESET_ALL)
+            print(f"Ideal Perp Qty:   {ideal_perp_qty:.8f}")
+            print(f"Final Perp Qty:   {final_perp_qty:.8f}")
+            print("-"*40)
+            if (existing_spot_quantity * spot_price) > 0:
+                print(Fore.CYAN + f"Utilizing Existing Spot: {existing_spot_quantity:.8f} {base_asset} (${(existing_spot_quantity * spot_price):.2f})" + Style.RESET_ALL)
+            print(f"Spot BUY Qty: {spot_qty_to_buy:.8f} (${spot_capital_to_buy:.2f})")
+            print(f"Perp SELL Qty: {final_perp_qty:.8f} (${final_perp_qty * spot_price:.2f})")
+
+            if final_perp_qty <= 0:
+                self._add_log(f"{Fore.RED}Error: Final perpetual quantity is zero or less after rounding. Cannot proceed.{Style.RESET_ALL}")
+                return
+
             confirm = await self._get_user_input("Press Enter to confirm (or enter 'x' to cancel): ")
             if confirm.strip().lower() == 'x' or confirm.strip() != '':
                 self._add_log("Trade execution cancelled by user.")
                 return
-                
-            # 7. Execute trades
-            self._add_log("Executing trades...")
-            if sizing['new_spot_capital_required'] > 1.0:
-                await self.api_manager.place_spot_buy_market_order(symbol=selected_symbol, quote_quantity=str(sizing['new_spot_capital_required']))
-            await self.api_manager.place_perp_market_order(symbol=selected_symbol, quantity=str(sizing['total_perp_quantity_to_short']), side='SELL')
+
+            # 10. Execute trades with final, adjusted quantities
+            self._add_log("Executing trades with adjusted quantities...")
+            if spot_capital_to_buy > 1.0: # Only place spot order if it's worth more than $1
+                await self.api_manager.place_spot_buy_market_order(symbol=selected_symbol, quote_quantity=str(spot_capital_to_buy))
+            await self.api_manager.place_perp_market_order(symbol=selected_symbol, quantity=str(final_perp_qty), side='SELL')
             self._add_log(f"{Fore.GREEN}Successfully opened position for {selected_symbol}.{Style.RESET_ALL}")
 
             # Wait 1 second then refresh data to show the new position
@@ -508,37 +491,7 @@ class DashboardApp:
         """Fetches and displays funding rates for top perpetual contracts."""
         self._add_log("Fetching top funding rates for delta-neutral pairs...")
         try:
-            # Dynamically discover pairs available in both spot and perp markets
-            self._add_log("Discovering tradable pairs...")
-            spot_symbols = await self.api_manager.get_available_spot_symbols()
-            perp_symbols = await self.api_manager.get_available_perp_symbols()
-            
-            if not spot_symbols or not perp_symbols:
-                self._add_log(f"{Fore.YELLOW}Could not retrieve symbol lists from one or both markets.{Style.RESET_ALL}")
-                return
-
-            # Find the intersection of the two lists
-            symbols_to_scan = sorted(list(set(spot_symbols) & set(perp_symbols)))
-            
-            if not symbols_to_scan:
-                self._add_log(f"{Fore.YELLOW}No symbols are currently available in both spot and perpetual markets.{Style.RESET_ALL}")
-                return
-
-            self._add_log(f"Found {len(symbols_to_scan)} pairs available for delta-neutral. Fetching rates...")
-
-            rate_tasks = [self.api_manager.get_funding_rate_history(s, limit=1) for s in symbols_to_scan]
-            rate_results = await asyncio.gather(*rate_tasks, return_exceptions=True)
-
-            funding_data = []
-            for i, symbol in enumerate(symbols_to_scan):
-                rate_data = rate_results[i]
-                if not isinstance(rate_data, Exception) and rate_data:
-                    rate = float(rate_data[0].get('fundingRate', 0))
-                    apr = rate * 3 * 365 * 100
-                    funding_data.append({'symbol': symbol, 'rate': rate, 'apr': apr})
-            
-            # Sort by highest APR
-            self.funding_rate_cache = sorted(funding_data, key=lambda x: x['apr'], reverse=True)
+            self.funding_rate_cache = await self.api_manager.get_all_funding_rates()
             self._add_log("Funding rate scan complete.")
 
             # Display the results to the user
@@ -859,16 +812,7 @@ async def check_available_pairs():
     )
 
     try:
-        # Discover pairs available in both spot and perp markets
-        spot_symbols = await api_manager.get_available_spot_symbols()
-        perp_symbols = await api_manager.get_available_perp_symbols()
-
-        if not spot_symbols or not perp_symbols:
-            print(Fore.RED + "ERROR: Could not retrieve symbol lists from one or both markets." + Style.RESET_ALL)
-            return
-
-        # Find intersection
-        available_pairs = sorted(list(set(spot_symbols) & set(perp_symbols)))
+        available_pairs = await api_manager.discover_delta_neutral_pairs()
 
         if not available_pairs:
             print(Fore.YELLOW + "No symbols are currently available in both spot and perpetual markets." + Style.RESET_ALL)
@@ -903,95 +847,39 @@ async def check_current_positions():
     )
 
     try:
-        # Analyze current positions using the same logic as the dashboard
-        print("Fetching position data from both spot and perpetual markets...")
+        print("Fetching comprehensive portfolio data from Aster DEX...")
+        portfolio_data = await api_manager.get_comprehensive_portfolio_data()
 
-        # Get position analysis and account data concurrently
-        results = await asyncio.gather(
-            api_manager.analyze_current_positions(),
-            api_manager.get_spot_account_balances(),
-            api_manager.get_perp_account_info(),
-            return_exceptions=True
-        )
-
-        analysis_results = results[0] if isinstance(results[0], dict) else {}
-        spot_balances = results[1] if isinstance(results[1], list) else []
-        perp_account_info = results[2] if isinstance(results[2], dict) else {}
-
-        if not analysis_results:
-            print(Fore.YELLOW + "No position analysis data available." + Style.RESET_ALL)
+        if not portfolio_data:
+            print(Fore.YELLOW + "No portfolio data available." + Style.RESET_ALL)
             return
 
-        # Process positions into delta-neutral and other categories
-        all_positions = list(analysis_results.values())
+        # Extract data from the comprehensive payload
+        all_positions = portfolio_data.get('analyzed_positions', [])
+        spot_balances = portfolio_data.get('spot_balances', [])
+        perp_account_info = portfolio_data.get('perp_account_info', {})
         delta_neutral_positions = [p for p in all_positions if p.get('is_delta_neutral')]
         other_positions = [p for p in all_positions if not p.get('is_delta_neutral')]
 
-        # Fetch current funding rates for delta-neutral positions
-        if delta_neutral_positions:
-            print(f"Fetching current funding rates for {len(delta_neutral_positions)} delta-neutral positions...")
-            rate_tasks = [api_manager.get_funding_rate_history(p['symbol'], limit=1) for p in delta_neutral_positions]
-            rate_results = await asyncio.gather(*rate_tasks, return_exceptions=True)
-
-            for i, pos in enumerate(delta_neutral_positions):
-                rate_data = rate_results[i]
-                if not isinstance(rate_data, Exception) and rate_data:
-                    latest_rate = float(rate_data[0].get('fundingRate', 0))
-                    pos['current_apr'] = latest_rate * 3 * 365 * 100
-                else:
-                    pos['current_apr'] = 'N/A'
-
         # Calculate portfolio totals
         spot_usdt_balance = next((float(b.get('free', 0)) for b in spot_balances if b.get('asset') == 'USDT'), 0.0)
-
-        # Extract perpetual balances
         assets = perp_account_info.get('assets', [])
         perp_usdt = next((float(a.get('walletBalance', 0)) for a in assets if a.get('asset') == 'USDT'), 0.0)
         perp_usdc = next((float(a.get('walletBalance', 0)) for a in assets if a.get('asset') == 'USDC'), 0.0)
         perp_usdf = next((float(a.get('walletBalance', 0)) for a in assets if a.get('asset') == 'USDF'), 0.0)
 
-        # Display portfolio summary using common function
+        # Display portfolio summary
         print(Fore.GREEN + f"\n{'='*70}")
         print("PORTFOLIO SUMMARY")
         print(f"{'='*70}" + Style.RESET_ALL)
         render_portfolio_summary(perp_usdt, perp_usdc, perp_usdf, spot_usdt_balance, title="", indent="")
 
-        # Display delta-neutral positions using common function
-        print(Fore.GREEN + f"\n{'='*70}")
-        print(f"DELTA-NEUTRAL POSITIONS ({len(delta_neutral_positions)} found)" if delta_neutral_positions else "DELTA-NEUTRAL POSITIONS")
-        print(f"{'='*70}" + Style.RESET_ALL)
+        # Display delta-neutral positions
+        render_delta_neutral_positions(all_positions, title=f"DELTA-NEUTRAL POSITIONS ({len(delta_neutral_positions)} found)")
 
-        if delta_neutral_positions:
-            render_delta_neutral_positions(all_positions, title="", indent="")
-        else:
-            print("No delta-neutral positions found.")
-            print("Use 'python delta_neutral_bot.py --pairs' to see available pairs for opening positions.")
-
-        # Display other positions (imbalanced or spot-only)
+        # Display other positions
         if other_positions:
-            print(Fore.GREEN + f"\n{'='*70}")
-            print(f"OTHER HOLDINGS ({len(other_positions)} found)")
-            print(f"{'='*70}" + Style.RESET_ALL)
-
-            # Header
-            header = f"{'Symbol':<12} {'Spot Bal':>12} {'Perp Pos':>12} {'Net Delta':>12} {'Net Value USD':>15} {'Imbal%':>8}"
-            print(header)
-            print("-" * len(header))
-
-            total_other_value = 0
-            for pos in other_positions:
-                symbol = pos.get('symbol', 'N/A')
-                spot_balance = pos.get('spot_balance', 0.0)
-                perp_position = pos.get('perp_position', 0.0)
-                net_delta = pos.get('net_delta', 0.0)
-                value_usd = pos.get('position_value_usd', 0.0)
-                imbalance = pos.get('imbalance_pct', 0.0)
-
-                total_other_value += value_usd
-
-                print(Fore.YELLOW + f"{symbol:<12} {spot_balance:>12.6f} {perp_position:>12.6f} {net_delta:>12.6f} {value_usd:>15,.2f} {imbalance:>7.2f}" + Style.RESET_ALL)
-
-            print(f"\nTotal Other Holdings Value: ${total_other_value:,.2f}")
+            render_other_positions(all_positions, title=f"OTHER HOLDINGS ({len(other_positions)} found)")
 
         # Summary
         print(Fore.GREEN + f"\n{'='*70}")
@@ -1000,14 +888,6 @@ async def check_current_positions():
         print(f"Delta-Neutral Positions: {len(delta_neutral_positions)}")
         print(f"Other Holdings:          {len(other_positions)}")
         print(f"Total Positions:         {len(all_positions)}")
-
-        if delta_neutral_positions:
-            avg_imbalance = sum(abs(p.get('imbalance_pct', 0)) for p in delta_neutral_positions) / len(delta_neutral_positions)
-            print(f"Average Imbalance:       {avg_imbalance:.2f}%")
-
-            # Count positions with good balance (<=5% imbalance)
-            well_balanced = sum(1 for p in delta_neutral_positions if abs(p.get('imbalance_pct', 0)) <= 5.0)
-            print(f"Well-Balanced Positions: {well_balanced}/{len(delta_neutral_positions)}")
 
     except Exception as e:
         print(Fore.RED + f"ERROR: Failed to analyze positions: {e}" + Style.RESET_ALL)
@@ -1027,152 +907,15 @@ async def check_spot_assets():
     )
 
     try:
-        # Fetch spot account balances
-        print("Fetching spot balances from Aster DEX...")
-        spot_balances = await api_manager.get_spot_account_balances()
+        print("Fetching comprehensive portfolio data from Aster DEX...")
+        portfolio_data = await api_manager.get_comprehensive_portfolio_data()
 
-        if not spot_balances:
+        if not portfolio_data or 'spot_balances' not in portfolio_data:
             print(Fore.YELLOW + "No spot balance data available." + Style.RESET_ALL)
             return
 
-        # Filter out zero balances and sort by asset name
-        significant_balances = [
-            b for b in spot_balances
-            if float(b.get('free', 0)) > 0 or float(b.get('locked', 0)) > 0
-        ]
-        significant_balances.sort(key=lambda x: x.get('asset', ''))
-
-        if not significant_balances:
-            print(Fore.YELLOW + "No assets with significant balances found." + Style.RESET_ALL)
-            return
-
-        # Separate stablecoins from other assets
-        stablecoins = {'USDT', 'USDC', 'USDF', 'BUSD', 'DAI'}
-        stable_balances = [b for b in significant_balances if b.get('asset') in stablecoins]
-        non_stable_balances = [b for b in significant_balances if b.get('asset') not in stablecoins]
-
-        # Fetch USD prices for non-stablecoin assets
-        total_usd_value = 0
-        if non_stable_balances:
-            print(f"Fetching current prices for {len(non_stable_balances)} non-stablecoin assets...")
-            print("(Trying multiple quote currencies - some API errors are expected during price discovery)")
-            price_tasks = []
-            for balance in non_stable_balances:
-                asset = balance.get('asset')
-                # Try multiple quote currencies to find active trading pairs
-                for quote in ['USDT', 'USDC', 'BUSD']:
-                    price_tasks.append(api_manager.get_spot_book_ticker(f"{asset}{quote}", suppress_errors=True))
-
-            price_results = await asyncio.gather(*price_tasks, return_exceptions=True)
-
-            # Process price results for each asset
-            price_index = 0
-            for balance in non_stable_balances:
-                asset = balance.get('asset')
-                balance['price_usd'] = 0.0
-                balance['quote_currency'] = 'N/A'
-
-                # Check each quote currency until we find a valid price
-                for quote in ['USDT', 'USDC', 'BUSD']:
-                    price_result = price_results[price_index]
-                    price_index += 1
-
-                    if not isinstance(price_result, Exception) and price_result.get('bidPrice'):
-                        price = float(price_result['bidPrice'])
-                        if price > 0:
-                            balance['price_usd'] = price
-                            balance['quote_currency'] = quote
-                            break
-
-                # Calculate USD values
-                free_amount = float(balance.get('free', 0))
-                locked_amount = float(balance.get('locked', 0))
-                total_amount = free_amount + locked_amount
-
-                balance['free_value_usd'] = free_amount * balance['price_usd']
-                balance['locked_value_usd'] = locked_amount * balance['price_usd']
-                balance['total_value_usd'] = total_amount * balance['price_usd']
-
-        # Calculate totals for stablecoins (assume 1:1 USD)
-        for balance in stable_balances:
-            free_amount = float(balance.get('free', 0))
-            locked_amount = float(balance.get('locked', 0))
-
-            balance['price_usd'] = 1.0
-            balance['quote_currency'] = 'USD'
-            balance['free_value_usd'] = free_amount
-            balance['locked_value_usd'] = locked_amount
-            balance['total_value_usd'] = free_amount + locked_amount
-
-        # Display results
-        print(Fore.GREEN + f"\n{'='*80}")
-        print("SPOT ASSET BALANCES")
-        print(f"{'='*80}" + Style.RESET_ALL)
-
-        # Display stablecoins first
-        if stable_balances:
-            print(Fore.GREEN + f"\nSTABLECOINS ({len(stable_balances)} assets)" + Style.RESET_ALL)
-            header = f"{'Asset':<8} {'Free':>15} {'Locked':>15} {'Total':>15} {'Value USD':>15}"
-            print(header)
-            print("-" * len(header))
-
-            stable_total_value = 0
-            for balance in stable_balances:
-                asset = balance.get('asset', 'N/A')
-                free = float(balance.get('free', 0))
-                locked = float(balance.get('locked', 0))
-                total = free + locked
-                value_usd = balance['total_value_usd']
-                stable_total_value += value_usd
-
-                print(f"{asset:<8} {free:>15,.6f} {locked:>15,.6f} {total:>15,.6f} {value_usd:>15,.2f}")
-
-            print(f"\nStablecoin Total: ${stable_total_value:,.2f}")
-
-        # Display other assets
-        if non_stable_balances:
-            print(Fore.GREEN + f"\nOTHER ASSETS ({len(non_stable_balances)} assets)" + Style.RESET_ALL)
-            header = f"{'Asset':<8} {'Free':>12} {'Locked':>12} {'Total':>12} {'Price':>12} {'Quote':>6} {'Value USD':>15}"
-            print(header)
-            print("-" * len(header))
-
-            other_total_value = 0
-            for balance in non_stable_balances:
-                asset = balance.get('asset', 'N/A')
-                free = float(balance.get('free', 0))
-                locked = float(balance.get('locked', 0))
-                total = free + locked
-                price = balance['price_usd']
-                quote = balance['quote_currency']
-                value_usd = balance['total_value_usd']
-                other_total_value += value_usd
-
-                # Color code based on whether we have price data
-                color = Fore.CYAN if price > 0 else Fore.YELLOW
-                price_str = f"{price:,.4f}" if price > 0 else "N/A"
-
-                print(color + f"{asset:<8} {free:>12,.6f} {locked:>12,.6f} {total:>12,.6f} {price_str:>12} {quote:>6} {value_usd:>15,.2f}" + Style.RESET_ALL)
-
-            print(f"\nOther Assets Total: ${other_total_value:,.2f}")
-
-        # Grand total
-        grand_total = sum(b['total_value_usd'] for b in significant_balances)
-        print(Fore.GREEN + f"\n{'='*80}")
-        print("SUMMARY")
-        print(f"{'='*80}" + Style.RESET_ALL)
-        print(f"Total Assets:     {len(significant_balances)}")
-        print(f"Stablecoins:      {len(stable_balances)}")
-        print(f"Other Assets:     {len(non_stable_balances)}")
-        print(f"Total Value:      ${grand_total:,.2f}")
-
-        # Show assets without price data
-        no_price_assets = [b for b in non_stable_balances if b['price_usd'] == 0]
-        if no_price_assets:
-            print(f"\nAssets without price data: {len(no_price_assets)}")
-            for balance in no_price_assets:
-                asset = balance.get('asset')
-                total = float(balance.get('free', 0)) + float(balance.get('locked', 0))
-                print(f"  {asset}: {total:.6f}")
+        spot_balances = portfolio_data['spot_balances']
+        render_spot_balances(spot_balances, title="Spot Balances (Excluding Stables)")
 
     except Exception as e:
         print(Fore.RED + f"ERROR: Failed to fetch spot assets: {e}" + Style.RESET_ALL)
@@ -1192,62 +935,19 @@ async def check_perpetual_positions():
     )
 
     try:
-        # Fetch perpetual account info
-        print("Fetching perpetual account information and positions...")
-        perp_account_info = await api_manager.get_perp_account_info()
+        print("Fetching comprehensive portfolio data from Aster DEX...")
+        portfolio_data = await api_manager.get_comprehensive_portfolio_data()
 
-        if not perp_account_info:
-            print(Fore.YELLOW + "No perpetual account data available." + Style.RESET_ALL)
+        if not portfolio_data or 'raw_perp_positions' not in portfolio_data:
+            print(Fore.YELLOW + "No perpetual position data available." + Style.RESET_ALL)
             return
 
-        # Extract positions with non-zero amounts
-        all_positions = perp_account_info.get('positions', [])
-        active_positions = [p for p in all_positions if float(p.get('positionAmt', 0)) != 0]
+        active_positions = portfolio_data['raw_perp_positions']
+        perp_account_info = portfolio_data['perp_account_info']
 
         if not active_positions:
             print(Fore.YELLOW + "No active perpetual positions found." + Style.RESET_ALL)
             return
-
-        # Fetch current mark prices for all active positions
-        print(f"Fetching current market prices for {len(active_positions)} positions...")
-        price_tasks = [api_manager.get_perp_book_ticker(p['symbol']) for p in active_positions]
-        price_results = await asyncio.gather(*price_tasks, return_exceptions=True)
-
-        # Process positions and calculate PnL
-        for i, pos in enumerate(active_positions):
-            symbol = pos.get('symbol')
-            entry_price = float(pos.get('entryPrice', 0))
-            position_amt = float(pos.get('positionAmt', 0))
-            unrealized_pnl = float(pos.get('unrealizedProfit', 0))
-
-            # Get current mark price
-            price_data = price_results[i]
-            if not isinstance(price_data, Exception) and price_data.get('bidPrice') and price_data.get('askPrice'):
-                bid_price = float(price_data['bidPrice'])
-                ask_price = float(price_data['askPrice'])
-                mark_price = (bid_price + ask_price) / 2
-            else:
-                mark_price = entry_price  # Fallback to entry price if no current price
-
-            # Calculate PnL percentage
-            if entry_price > 0:
-                # For long positions: (mark_price - entry_price) / entry_price * 100
-                # For short positions: (entry_price - mark_price) / entry_price * 100
-                if position_amt > 0:  # Long position
-                    pnl_pct = ((mark_price - entry_price) / entry_price) * 100
-                else:  # Short position
-                    pnl_pct = ((entry_price - mark_price) / entry_price) * 100
-            else:
-                pnl_pct = 0.0
-
-            # Calculate notional value
-            notional_value = abs(position_amt) * mark_price
-
-            # Add calculated fields to position
-            pos['mark_price'] = mark_price
-            pos['pnl_pct'] = pnl_pct
-            pos['notional_value'] = notional_value
-            pos['leverage'] = float(pos.get('leverage', 1))
 
         # Get account balance information
         assets = perp_account_info.get('assets', [])
@@ -1269,24 +969,6 @@ async def check_perpetual_positions():
 
         # Use common function to render the positions table
         render_perpetual_positions_table(active_positions, title="\nPOSITION DETAILS", show_summary=True)
-
-        # Additional CLI-specific metrics
-        print(Fore.GREEN + f"\nADDITIONAL METRICS" + Style.RESET_ALL)
-        total_notional = sum(pos.get('notional_value', 0) for pos in active_positions)
-        print(f"Total Notional Value:    ${total_notional:>12,.2f}")
-
-        if total_wallet_balance > 0:
-            account_pnl_pct = (total_unrealized_pnl / total_wallet_balance) * 100
-            print(f"Account PnL %:           {account_pnl_pct:>12.2f}%")
-
-            # Calculate effective leverage (total notional / margin balance)
-            if total_margin_balance > 0:
-                effective_leverage = total_notional / total_margin_balance
-                print(f"Effective Leverage:      {effective_leverage:>12.2f}x")
-
-        if active_positions:
-            avg_pnl_pct = sum(p['pnl_pct'] for p in active_positions) / len(active_positions)
-            print(f"Average PnL %:           {avg_pnl_pct:>12.2f}%")
 
     except Exception as e:
         print(Fore.RED + f"ERROR: Failed to fetch perpetual positions: {e}" + Style.RESET_ALL)
@@ -1667,40 +1349,10 @@ async def check_funding_rates():
     )
 
     try:
-        # Discover pairs available in both spot and perp markets
-        spot_symbols = await api_manager.get_available_spot_symbols()
-        perp_symbols = await api_manager.get_available_perp_symbols()
-
-        if not spot_symbols or not perp_symbols:
-            print(Fore.RED + "ERROR: Could not retrieve symbol lists from one or both markets." + Style.RESET_ALL)
-            return
-
-        # Find intersection
-        symbols_to_scan = sorted(list(set(spot_symbols) & set(perp_symbols)))
-
-        if not symbols_to_scan:
-            print(Fore.YELLOW + "No symbols are currently available in both spot and perpetual markets." + Style.RESET_ALL)
-            return
-
-        print(f"Fetching funding rates for {len(symbols_to_scan)} pairs...")
-
-        # Fetch funding rates concurrently
-        rate_tasks = [api_manager.get_funding_rate_history(s, limit=1) for s in symbols_to_scan]
-        rate_results = await asyncio.gather(*rate_tasks, return_exceptions=True)
-
-        funding_data = []
-        for i, symbol in enumerate(symbols_to_scan):
-            rate_data = rate_results[i]
-            if not isinstance(rate_data, Exception) and rate_data:
-                rate = float(rate_data[0].get('fundingRate', 0))
-                apr = rate * 3 * 365 * 100
-                funding_data.append({'symbol': symbol, 'rate': rate, 'apr': apr})
-
-        # Sort by highest APR
-        funding_data.sort(key=lambda x: x['apr'], reverse=True)
+        funding_data = await api_manager.get_all_funding_rates()
 
         if not funding_data:
-            print(Fore.YELLOW + "No funding rate data available." + Style.RESET_ALL)
+            print(Fore.YELLOW + "No funding rate data available or no delta-neutral pairs found." + Style.RESET_ALL)
             return
 
         # Use common function to render the table
@@ -1826,65 +1478,26 @@ async def rebalance_usdt_cli():
     )
 
     try:
-        # Get current balances
-        print("Fetching current account balances...")
+        print("Analyzing current USDT distribution...")
+        result = await api_manager.rebalance_usdt_50_50()
 
-        # Get both spot and perpetual balances
-        results = await asyncio.gather(
-            api_manager.get_spot_account_balances(),
-            api_manager.get_perp_account_info(),
-            return_exceptions=True
-        )
+        # Display current state
+        print("\n" + Fore.CYAN + "=== USDT BALANCE ANALYSIS ===" + Style.RESET_ALL)
+        print(f"Current Spot USDT:     ${result['current_spot_usdt']:>10.2f}")
+        print(f"Current Perp USDT:     ${result['current_perp_usdt']:>10.2f}")
+        print(f"Total Available USDT:  ${result['total_usdt']:>10.2f}")
+        print(f"Target Each (50/50):   ${result['target_each']:>10.2f}")
 
-        spot_balances = results[0] if isinstance(results[0], list) else []
-        perp_account_info = results[1] if isinstance(results[1], dict) else {}
-
-        # Extract USDT balances
-        spot_usdt_balance = 0.0
-        for balance in spot_balances:
-            if balance.get('asset') == 'USDT':
-                spot_usdt_balance = float(balance.get('free', 0))
-                break
-
-        perp_usdt_balance = 0.0
-        perp_assets = perp_account_info.get('assets', [])
-        for asset in perp_assets:
-            if asset.get('asset') == 'USDT':
-                perp_usdt_balance = float(asset.get('availableBalance', 0))
-                break
-
-        # Display current status
-        total_usdt = spot_usdt_balance + perp_usdt_balance
-        target_each = total_usdt / 2
-
-        print(f"\nCurrent USDT Distribution:")
-        print(f"  Spot Account:        ${spot_usdt_balance:,.2f}")
-        print(f"  Perpetual Account:   ${perp_usdt_balance:,.2f}")
-        print(f"  Total Available:     ${total_usdt:,.2f}")
-        print(f"  Target Each (50/50): ${target_each:,.2f}")
-
-        # Calculate transfer needed
-        spot_difference = target_each - spot_usdt_balance
-
-        if abs(spot_difference) <= 1.0:
-            print(Fore.GREEN + f"\nAccounts are already balanced (difference: ${abs(spot_difference):.2f})." + Style.RESET_ALL)
+        if not result['transfer_needed']:
+            print(Fore.GREEN + "\n✓ ALREADY BALANCED: Your USDT is already distributed 50/50 (within $1)" + Style.RESET_ALL)
             return
 
-        # Determine transfer direction and amount
-        if spot_difference > 0:
-            # Need to transfer from perp to spot
-            direction = "PERP_TO_SPOT"
-            amount = abs(spot_difference)
-            print(f"\nTransfer Required: ${amount:.2f} from Perpetual to Spot")
-        else:
-            # Need to transfer from spot to perp
-            direction = "SPOT_TO_PERP"
-            amount = abs(spot_difference)
-            print(f"\nTransfer Required: ${amount:.2f} from Spot to Perpetual")
+        # Show transfer details and ask for confirmation
+        print(f"\nTransfer Required:")
+        print(f"  Amount:     ${result['transfer_amount']:.2f}")
+        print(f"  Direction:  {result['transfer_direction'].replace('_', ' → ')}")
 
-        # Ask for confirmation
-        direction_text = direction.replace('_TO_', ' to ').replace('PERP', 'Perpetual').replace('SPOT', 'Spot')
-        print(Fore.YELLOW + f"\nConfirm transfer of ${amount:.2f} USDT ({direction_text})?" + Style.RESET_ALL)
+        print(Fore.YELLOW + f"\nConfirm transfer of ${result['transfer_amount']:.2f} USDT?" + Style.RESET_ALL)
         confirmation = input("Type 'yes' to proceed: ").strip().lower()
 
         if confirmation != 'yes':
@@ -1892,46 +1505,16 @@ async def rebalance_usdt_cli():
             return
 
         # Execute the transfer
-        print(f"Executing transfer...")
-        result = await api_manager.transfer_between_spot_and_perp('USDT', amount, direction)
+        print("Executing transfer...")
+        transfer_result = await api_manager.transfer_between_spot_and_perp(
+            'USDT', result['transfer_amount'], result['transfer_direction']
+        )
 
-        if result.get('success'):
+        if transfer_result and transfer_result.get('status') == 'SUCCESS':
             print(Fore.GREEN + f"[SUCCESS] Transfer completed successfully!" + Style.RESET_ALL)
-            print(f"Transaction ID: {result.get('tranId', 'N/A')}")
-
-            # Show updated balances
-            print("\nFetching updated balances...")
-
-            results = await asyncio.gather(
-                api_manager.get_spot_account_balances(),
-                api_manager.get_perp_account_info(),
-                return_exceptions=True
-            )
-
-            spot_balances = results[0] if isinstance(results[0], list) else []
-            perp_account_info = results[1] if isinstance(results[1], dict) else {}
-
-            # Extract updated USDT balances
-            new_spot_usdt = 0.0
-            for balance in spot_balances:
-                if balance.get('asset') == 'USDT':
-                    new_spot_usdt = float(balance.get('free', 0))
-                    break
-
-            new_perp_usdt = 0.0
-            perp_assets = perp_account_info.get('assets', [])
-            for asset in perp_assets:
-                if asset.get('asset') == 'USDT':
-                    new_perp_usdt = float(asset.get('availableBalance', 0))
-                    break
-
-            print(f"\nUpdated USDT Distribution:")
-            print(f"  Spot Account:        ${new_spot_usdt:,.2f}")
-            print(f"  Perpetual Account:   ${new_perp_usdt:,.2f}")
-            print(f"  Total Available:     ${new_spot_usdt + new_perp_usdt:,.2f}")
-
+            print(f"Transaction ID: {transfer_result.get('tranId', 'N/A')}")
         else:
-            print(Fore.RED + f"Transfer failed: {result.get('msg', 'Unknown error')}" + Style.RESET_ALL)
+            print(Fore.RED + f"Transfer failed: {transfer_result}" + Style.RESET_ALL)
 
     except Exception as e:
         print(Fore.RED + f"ERROR: Failed to rebalance USDT: {e}" + Style.RESET_ALL)
