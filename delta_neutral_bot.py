@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from colorama import init, Fore, Style
 import math
 from decimal import Decimal
+from typing import Optional, Dict, Any, List, Tuple
 
 # Platform-specific imports for non-blocking input
 try:
@@ -268,6 +269,11 @@ class DashboardApp:
                 await self._rebalance_usdt_workflow()
                 self.interactive_mode = False
                 self._render_dashboard()
+            elif command == 'a':
+                self.interactive_mode = True
+                await self._analyze_funding_workflow()
+                self.interactive_mode = False
+                self._render_dashboard()
 
     def _add_log(self, message: str):
         """Adds a timestamped message to the log queue."""
@@ -284,18 +290,18 @@ class DashboardApp:
         self._add_log("Starting 'Open Position' workflow...")
         try:
             # 1. Select Symbol
-            all_opportunities = await self.api_manager.discover_delta_neutral_pairs()
-            if not all_opportunities:
+            available_opportunities = self.opportunities
+            if not available_opportunities:
                 self._add_log(f"{Fore.YELLOW}No new opportunities available to open a position.{Style.RESET_ALL}")
                 return
 
             print("\n" + Fore.CYAN + "Please select a symbol to open a position (or enter 'x' to cancel):" + Style.RESET_ALL)
-            for i, opp in enumerate(all_opportunities):
+            for i, opp in enumerate(available_opportunities):
                 print(f"[{i+1}] {opp}")
             
             selection = await self._get_user_input("Enter the number of the symbol: ")
             if selection.strip().lower() == 'x': raise KeyboardInterrupt
-            selected_symbol = all_opportunities[int(selection) - 1]
+            selected_symbol = available_opportunities[int(selection) - 1]
 
             # 2. Get Capital Input & Calculate Minimums
             perp_balance = self.perp_margin_balance
@@ -628,6 +634,55 @@ class DashboardApp:
         except Exception as e:
             self._add_log(f"{Fore.RED}Error during health check: {e}{Style.RESET_ALL}")
 
+    async def _analyze_funding_workflow(self):
+        """Guides the user through analyzing funding for a specific position."""
+        self._add_log("Starting 'Analyze Paid Fundings' workflow...")
+        dn_positions = [p for p in self.positions if p.get('is_delta_neutral')]
+
+        if not dn_positions:
+            self._add_log(f"{Fore.YELLOW}No delta-neutral positions available to analyze.{Style.RESET_ALL}")
+            if self.is_standalone_workflow:
+                print(f"{Fore.YELLOW}No delta-neutral positions available to analyze.{Style.RESET_ALL}")
+            return
+
+        try:
+            # 1. Ask user to select a position
+            print("\n" + Fore.CYAN + "Select a delta-neutral position to analyze paid fundings (or 'x' to cancel):" + Style.RESET_ALL)
+            for i, pos in enumerate(dn_positions):
+                print(f"[{i+1}] {pos.get('symbol', 'N/A')}")
+            
+            selection = await self._get_user_input("Enter the number of the position: ")
+            if selection.strip().lower() == 'x': raise KeyboardInterrupt
+
+            selected_position = dn_positions[int(selection) - 1]
+            symbol_to_analyze = selected_position.get('symbol')
+
+            # 2. Perform analysis using the refactored standalone function
+            self._add_log(f"Analyzing paid fundings for {symbol_to_analyze}...")
+            analysis_result = await perform_funding_analysis(self.api_manager, symbol_to_analyze)
+
+            # 3. Display results using the refactored standalone renderer
+            if analysis_result:
+                render_funding_analysis_results(analysis_result)
+            else:
+                self._add_log(f"{Fore.RED}Could not complete funding analysis for {symbol_to_analyze}.{Style.RESET_ALL}")
+
+            if self.is_standalone_workflow:
+                print(f"\n{Fore.CYAN}Analysis complete.{Style.RESET_ALL}")
+            else:
+                print(f"\n{Fore.CYAN}Analysis complete. Press Enter to return to dashboard...{Style.RESET_ALL}")
+                await self._get_user_input("")
+
+        except (ValueError, IndexError):
+            self._add_log(f"{Fore.RED}Invalid selection.{Style.RESET_ALL}")
+        except KeyboardInterrupt:
+            self._add_log("Operation cancelled by user.")
+
+    async def _calculate_funding_for_position(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Calculates funding fees for a specific position using the standalone function."""
+        # This method now serves as a wrapper around the standalone function
+        return await perform_funding_analysis(self.api_manager, symbol)
+
     def _render_portfolio_summary(self):
         """Renders the summary of portfolio balances."""
         print()  # Single line break before section
@@ -756,7 +811,7 @@ class DashboardApp:
         """Renders the main menu of available actions."""
         print(Fore.CYAN + "\n--- Menu ---" + Style.RESET_ALL)
         print("[R] Refresh Data   [O] Open Position   [C] Close Position   [F] Scan Funding Rates   [Q] Quit")
-        print("[H] Health Check   [B] Balance USDT (Perp/Spot)")
+        print("[H] Health Check   [B] Balance USDT (Perp/Spot)   [A] Analyze Paid Fundings")
 
 
 
@@ -1215,6 +1270,139 @@ def render_opportunities(opportunities_data, title="Potential Opportunities", in
         print(f"{indent}- {opp}")
 
 
+def render_funding_analysis_results(analysis_result: Dict[str, Any]):
+    """Renders the results of a funding analysis to the console."""
+    if not analysis_result:
+        return
+
+    print(f"\n{Fore.YELLOW}--- Paid Fundings Analysis Result for {analysis_result['symbol']} ---{Style.RESET_ALL}")
+    print(f"Perp Position: {analysis_result['position_amount']} (Notional: {analysis_result['position_notional']:.4f} USDT)")
+    print(f"Spot Balance: {analysis_result['spot_balance']} {analysis_result['symbol'].replace('USDT','')}")
+    print(f"Effective Position Value: {Fore.CYAN}{analysis_result['effective_position_value']:.4f} USDT{Style.RESET_ALL}")
+    print(f"Position Start Time: {analysis_result['position_start_time']}")
+    print("-" * 33)
+    print(f"Funding Payments Found: {analysis_result['funding_payments_count']}")
+    
+    funding_color = Fore.GREEN if analysis_result['total_funding'] > 0 else Fore.RED
+    print(f"Total Funding Fees Paid: {funding_color}{analysis_result['total_funding']:.8f} {analysis_result['asset']}{Style.RESET_ALL}")
+    print(f"Funding as % of Effective Value: {analysis_result['funding_as_percentage_of_effective_value']:.4f}%")
+    
+    # Visual progress bar for fee coverage
+    progress = min(Decimal('100'), analysis_result['fee_coverage_progress']) # Cap at 100%
+    bar_length = 25
+    filled_length = int(bar_length * progress / 100)
+    bar = (Fore.GREEN + '#' * filled_length) + (Style.DIM + '-' * (bar_length - filled_length))
+    print(f"Fee Coverage Progress: [{bar}{Style.RESET_ALL}] {analysis_result['fee_coverage_progress']:.2f}% of 0.135%")
+    
+    print(f"\n{Style.DIM}Notes:")
+    print(f"{Style.DIM}- Funding is paid every 8 hours at 00:00, 08:00, and 16:00 UTC.")
+    print(f"{Style.DIM}- Effective Position Value = Spot Value + Abs(Perp Notional) + PnL.")
+    print(f"{Style.DIM}- Fee Coverage Progress shows how close the funding has come to paying")
+    print(f"{Style.DIM}  for the estimated 0.135% in total entry/exit trading fees.")
+    print(f"{Style.DIM}- This analysis does not account for price spreads.{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}-------------------------------------------{Style.RESET_ALL}")
+
+
+async def perform_funding_analysis(manager: AsterApiManager, symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    Performs a standalone funding analysis for a given symbol.
+    This function is self-contained and fetches all necessary data.
+    """
+    try:
+        # 1. Fetch all necessary data concurrently
+        all_positions_task = manager.get_perp_account_info()
+        spot_balances_task = manager.get_spot_account_balances()
+        ticker_task = manager.get_perp_book_ticker(symbol)
+        
+        all_positions, spot_balances, ticker = await asyncio.gather(
+            all_positions_task, spot_balances_task, ticker_task
+        )
+
+        position = next((p for p in all_positions.get('positions', []) if p.get('symbol') == symbol and Decimal(p.get('positionAmt', '0')) != 0), None)
+
+        if not position:
+            print(f"{Fore.YELLOW}No open position found for {symbol}.{Style.RESET_ALL}")
+            return None
+
+        # Extract data from fetched results
+        current_pos_amount = Decimal(position.get('positionAmt', '0'))
+        position_notional = Decimal(position.get('notional', '0'))
+        unrealized_pnl = Decimal(position.get('unrealizedProfit', '0'))
+        mark_price = Decimal(ticker.get('bidPrice'))
+        base_asset = symbol.replace('USDT', '')
+        spot_balance = next((Decimal(b.get('free', '0')) for b in spot_balances if b.get('asset') == base_asset), Decimal('0'))
+        spot_value_usd = spot_balance * mark_price
+        effective_position_value = spot_value_usd + abs(position_notional) + unrealized_pnl
+
+    except Exception as e:
+        print(f"{Fore.RED}Error fetching account or market data: {e}{Style.RESET_ALL}")
+        return None
+
+    # 2. Fetch recent trades to find the position's opening time
+    try:
+        trades = await manager.get_user_trades(symbol=symbol, limit=1000)
+        if not trades:
+            print(f"{Fore.YELLOW}No recent trades found for {symbol}.{Style.RESET_ALL}")
+            return None
+
+        trades.sort(key=lambda x: int(x['time']))
+        position_start_time = None
+        running_total = Decimal('0')
+        
+        for trade in reversed(trades):
+            trade_qty = Decimal(trade['qty'])
+            if trade['side'].upper() == 'SELL':
+                trade_qty *= -1
+            
+            running_total += trade_qty
+            if abs(running_total - current_pos_amount) < Decimal('0.000001'):
+                position_start_time = int(trade['time'])
+                break
+        
+        if not position_start_time:
+            print(f"{Fore.YELLOW}Could not determine position start time from recent trades.{Style.RESET_ALL}")
+            return None
+
+        start_datetime = datetime.fromtimestamp(position_start_time / 1000)
+
+    except Exception as e:
+        print(f"{Fore.RED}Error fetching user trades: {e}{Style.RESET_ALL}")
+        return None
+
+    # 3. Fetch funding payments since the position was opened
+    try:
+        funding_payments = await manager.get_income_history(
+            symbol=symbol,
+            income_type='FUNDING_FEE',
+            start_time=position_start_time,
+            limit=1000
+        )
+
+        total_funding = sum(Decimal(p['income']) for p in funding_payments)
+        funding_percentage = (total_funding / effective_position_value) * 100 if effective_position_value != 0 else Decimal('0')
+        
+        FEE_THRESHOLD_PERCENT = Decimal('0.135')
+        fee_coverage_progress = (funding_percentage / FEE_THRESHOLD_PERCENT) * 100 if funding_percentage > 0 else Decimal('0')
+
+        return {
+            "symbol": symbol,
+            "position_amount": current_pos_amount,
+            "position_notional": position_notional,
+            "spot_balance": spot_balance,
+            "effective_position_value": effective_position_value,
+            "position_start_time": start_datetime.strftime('%Y-%m-%d %H:%M:%S'),
+            "funding_payments_count": len(funding_payments),
+            "total_funding": total_funding,
+            "funding_as_percentage_of_effective_value": funding_percentage,
+            "fee_coverage_progress": fee_coverage_progress,
+            "asset": funding_payments[0]['asset'] if funding_payments else 'USDT'
+        }
+
+    except Exception as e:
+        print(f"{Fore.RED}Error fetching funding history: {e}{Style.RESET_ALL}")
+        return None
+
+
 async def perform_health_check_analysis(api_manager):
     """
     Shared health check logic that analyzes positions and returns health issues.
@@ -1599,6 +1787,37 @@ async def run_interactive_close_workflow():
     await app._close_position_workflow()
     await app.api_manager.close()
 
+async def run_interactive_funding_analysis_workflow():
+    """Helper to run the interactive funding analysis workflow from the CLI."""
+    app = DashboardApp()
+    print("Initializing app and fetching market data...")
+    await app._fetch_and_update_data()
+    app.interactive_mode = True
+    app.is_standalone_workflow = True
+    await app._analyze_funding_workflow()
+    await app.api_manager.close()
+
+async def analyze_fundings_cli(symbol: str):
+    """CLI function for non-interactive funding analysis."""
+    print(Fore.CYAN + f"Analyzing paid fundings for {symbol}..." + Style.RESET_ALL)
+    
+    api_manager = AsterApiManager(
+        api_user=os.getenv('API_USER'),
+        api_signer=os.getenv('API_SIGNER'),
+        api_private_key=os.getenv('API_PRIVATE_KEY'),
+        apiv1_public=os.getenv('APIV1_PUBLIC_KEY'),
+        apiv1_private=os.getenv('APIV1_PRIVATE_KEY')
+    )
+
+    try:
+        analysis_result = await perform_funding_analysis(api_manager, symbol)
+        if analysis_result:
+            render_funding_analysis_results(analysis_result)
+        else:
+            print(f"{Fore.RED}Could not perform analysis for {symbol}.{Style.RESET_ALL}")
+    finally:
+        await api_manager.close()
+
 def main():
     """The main function to run the bot."""
     parser = argparse.ArgumentParser(description="Delta-Neutral Funding Rate Farming Bot")
@@ -1612,6 +1831,7 @@ def main():
     parser.add_argument('--rebalance', action='store_true', help="Rebalance USDT between spot and perpetual accounts 50/50")
     parser.add_argument('--open', nargs='*', help="Open a new delta-neutral position. Runs interactively if no symbol/capital is provided.")
     parser.add_argument('--close', nargs='?', const=True, default=None, help="Close a delta-neutral position. Runs interactively if no symbol is provided.")
+    parser.add_argument('--analyze-fundings', nargs='?', const=True, default=None, help="Analyze paid fundings for a delta-neutral position. Runs interactively if no symbol is provided.")
     parser.add_argument('--yes', action='store_true', help="Bypass confirmation for non-interactive commands like --open.")
     args = parser.parse_args()
 
@@ -1709,6 +1929,29 @@ def main():
         except KeyboardInterrupt:
             print("\nOperation cancelled.")
         return
+
+    if args.rebalance:
+        try:
+            asyncio.run(rebalance_usdt_cli())
+        except KeyboardInterrupt:
+            print("\nOperation cancelled.")
+        return
+
+    if args.analyze_fundings is not None:
+        if args.analyze_fundings is True:
+            # Interactive mode
+            try:
+                asyncio.run(run_interactive_funding_analysis_workflow())
+            except KeyboardInterrupt:
+                print("\nOperation cancelled.")
+            return
+        else:
+            # Non-interactive CLI mode
+            try:
+                asyncio.run(analyze_fundings_cli(args.analyze_fundings))
+            except KeyboardInterrupt:
+                print("\nOperation cancelled.")
+            return
 
     # Default behavior: run the dashboard
     app = DashboardApp(is_test_run=args.test)
