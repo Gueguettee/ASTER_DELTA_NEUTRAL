@@ -25,6 +25,7 @@ Use ASTER for all tests (e.g. position open close) in both perp and spot.
 - **Key Features**:
     - Interactive terminal dashboard with real-time updates.
     - Comprehensive CLI for non-interactive operations (`--pairs`, `--positions`, `--health-check`, `--rebalance`, etc.).
+    - Interactive CLI workflows for opening and closing positions (`--open`, `--close`).
     - Automated 50/50 USDT rebalancing between spot and perpetual accounts.
     - Portfolio-wide health checks for imbalance and liquidation risk.
     - Dynamic discovery of tradable delta-neutral pairs.

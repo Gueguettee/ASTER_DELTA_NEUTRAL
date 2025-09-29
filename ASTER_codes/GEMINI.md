@@ -42,6 +42,18 @@ python delta_neutral_bot.py
 
 # Or use CLI commands for specific tasks (e.g., check positions)
 python delta_neutral_bot.py --positions
+
+# Open a position interactively
+python delta_neutral_bot.py --open
+
+# Open a $100 position in BTCUSDT non-interactively
+python delta_neutral_bot.py --open BTCUSDT 100 --yes
+
+# Close a position interactively
+python delta_neutral_bot.py --close
+
+# Close a BTCUSDT position non-interactively
+python delta_neutral_bot.py --close BTCUSDT --yes
 ```
 
 ### Testing
@@ -50,29 +62,13 @@ The project has a comprehensive test suite covering the API manager, strategy lo
 
 *   **Run all unit tests:**
     ```bash
-    python -m unittest test_api_manager test_strategy_logic test_delta_neutral_bot_cli -v
-    ```
-
-*   **Run API manager tests:**
-    ```bash
-    python -m unittest test_api_manager -v
-    ```
-
-*   **Run strategy logic tests:**
-    ```bash
-    python -m unittest test_strategy_logic -v
-    ```
-
-*   **Run CLI tests:**
-    ```bash
-    python -m unittest test_delta_neutral_bot_cli -v
+    python -m unittest discover -v
     ```
 
 *   **Run integration tests (requires real API credentials):**
     ```bash
     python run_integration_tests.py
     ```
-There are also more specific tests for orders, positions, and other methods.
 
 ## Development Conventions
 
