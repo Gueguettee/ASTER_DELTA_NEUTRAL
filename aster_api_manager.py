@@ -694,6 +694,46 @@ class AsterApiManager:
             return close_details
 
 
+    async def get_income_history(self, symbol: Optional[str] = None, income_type: Optional[str] = None, start_time: Optional[int] = None, end_time: Optional[int] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get income history for the perpetuals account.
+        NOTE: This v1 endpoint uses HMAC-SHA256 authentication, not the v3 eth signature.
+        """
+        params = {'limit': limit}
+        if symbol:
+            params['symbol'] = symbol
+        if income_type:
+            params['incomeType'] = income_type
+        if start_time:
+            params['startTime'] = start_time
+        if end_time:
+            params['endTime'] = end_time
+
+        return await self._make_spot_request(
+            method='GET',
+            path='/fapi/v1/income',
+            params=params,
+            signed=True,
+            base_url=FUTURES_BASE_URL
+        )
+
+    async def get_user_trades(self, symbol: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get user's trade history for a specific symbol.
+        NOTE: This v1 endpoint uses HMAC-SHA256 authentication.
+        """
+        params = {
+            'symbol': symbol,
+            'limit': limit
+        }
+        return await self._make_spot_request(
+            method='GET',
+            path='/fapi/v1/userTrades',
+            params=params,
+            signed=True,
+            base_url=FUTURES_BASE_URL
+        )
+
     async def close(self):
         """Close the HTTP session and perpetual client session."""
         if self.session and not self.session.closed:
