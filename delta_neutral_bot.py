@@ -579,7 +579,7 @@ class DashboardApp:
             # Display position PnL summary
             if position_pnl_data:
                 print(Fore.CYAN + "\nPOSITION PnL SUMMARY:" + Style.RESET_ALL)
-                header = f"{'Symbol':<12} {'Value (USD)':<12} {'Spot (USD)':<12} {'Imbalance':<10} {'PnL %':<10}"
+                header = f"{'Symbol':<12} {'Value':<12} {'Imbalance':<10} {'PnL %':<10}"
                 print(header)
                 print("-" * len(header))
 
@@ -610,7 +610,7 @@ class DashboardApp:
                         pnl_color = Fore.YELLOW
                         pnl_str = "N/A"
 
-                    print(f"{row_color}{symbol:<12} ${value_usd:<11.2f} ${spot_value_usd:<11.2f} {imbalance_pct:<9.2f}% {pnl_color}{pnl_str:<10}{Style.RESET_ALL}")
+                    print(f"{row_color}{symbol:<12} ${value_usd:<11.2f} {imbalance_pct:<9.2f}% {pnl_color}{pnl_str:<10}{Style.RESET_ALL}")
 
             if not critical_issues and not health_issues:
                 print(Fore.GREEN + "\nALL CLEAR: No health issues detected with your positions." + Style.RESET_ALL)
@@ -695,6 +695,7 @@ class DashboardApp:
         """Renders the analyzed delta-neutral positions."""
         render_delta_neutral_positions(
             self.positions,
+            self.raw_perp_positions,
             title="Delta-Neutral Positions",
             indent=""
         )
@@ -818,6 +819,7 @@ async def check_current_positions():
         all_positions = portfolio_data.get('analyzed_positions', [])
         spot_balances = portfolio_data.get('spot_balances', [])
         perp_account_info = portfolio_data.get('perp_account_info', {})
+        raw_perp_positions = portfolio_data.get('raw_perp_positions', [])
         delta_neutral_positions = [p for p in all_positions if p.get('is_delta_neutral')]
         other_positions = [p for p in all_positions if not p.get('is_delta_neutral')]
 
@@ -835,7 +837,7 @@ async def check_current_positions():
         render_portfolio_summary(perp_usdt, perp_usdc, perp_usdf, spot_usdt_balance, title="", indent="")
 
         # Display delta-neutral positions
-        render_delta_neutral_positions(all_positions, title=f"DELTA-NEUTRAL POSITIONS ({len(delta_neutral_positions)} found)")
+        render_delta_neutral_positions(all_positions, raw_perp_positions, title=f"DELTA-NEUTRAL POSITIONS ({len(delta_neutral_positions)} found)")
 
         # Display other positions
         if other_positions:
@@ -1081,10 +1083,11 @@ def render_portfolio_summary(perp_usdt_balance, perp_usdc_balance, perp_usdf_bal
     print(f"{indent}Total Portfolio USD: ${total_portfolio_value:,.2f}")
 
 
-def render_delta_neutral_positions(positions_data, title="Delta-Neutral Positions", indent=""):
+def render_delta_neutral_positions(positions_data, raw_perp_positions, title="Delta-Neutral Positions", indent=""):
     """Common function to render delta-neutral positions table.
     Args:
         positions_data: List of position dictionaries with delta-neutral analysis
+        raw_perp_positions: List of raw perpetual position data for PnL lookup
         title: Title to display above the table
         indent: String to prepend to each line for indentation
     """
@@ -1096,7 +1099,7 @@ def render_delta_neutral_positions(positions_data, title="Delta-Neutral Position
         print(f"{indent}No delta-neutral positions found.")
         return
 
-    header = f"{'Symbol':<12} {'Spot Balance':>15} {'Spot USD':>12} {'Perp Position':>15} {'Net Delta':>12} {'Value (USD)':>15} {'Imbalance':>12} {' Eff. APR (%)':>12}"
+    header = f"{'Symbol':<12} {'Spot Balance':>15} {'Perp Position':>15} {'Net Delta':>12} {'Value (spot+perp+pnl)':>25} {'Imbalance':>12} {' Eff. APR (%)':>12}"
     print(f"{indent}{header}")
     print(f"{indent}" + "-" * len(header))
 
@@ -1106,16 +1109,23 @@ def render_delta_neutral_positions(positions_data, title="Delta-Neutral Position
         spot_balance = pos.get('spot_balance', 0.0)
         perp_position = pos.get('perp_position', 0.0)
         net_delta = pos.get('net_delta', 0.0)
-        value_usd = pos.get('position_value_usd', 0.0)
         imbalance = pos.get('imbalance_pct', 0.0)
         apr = pos.get('current_apr', 'N/A')
         apr_str = f"{apr/2.0:.2f}" if isinstance(apr, (int, float)) else str(apr)
 
-        # Calculate spot value in USD
-        current_price = pos.get('current_price', 0.0)
-        spot_value_usd = spot_balance * current_price
+        # Find the corresponding raw perp position to get PnL and price
+        raw_pos = next((p for p in raw_perp_positions if p.get('symbol') == symbol), None)
+        pnl = float(raw_pos.get('unrealizedProfit', 0)) if raw_pos else 0.0
+        current_price = float(raw_pos.get('markPrice', 0)) if raw_pos else pos.get('current_price', 0.0)
 
-        total_dn_value += value_usd
+        # Calculate different components of value
+        spot_value_usd = spot_balance * current_price
+        short_value_usd = abs(perp_position) * current_price
+
+        # User-defined formula for "Value"
+        final_value = spot_value_usd + short_value_usd + pnl
+
+        total_dn_value += final_value
 
         # Color coding based on spot value warning levels
         if spot_value_usd < 5:
@@ -1125,7 +1135,7 @@ def render_delta_neutral_positions(positions_data, title="Delta-Neutral Position
         else:
             row_color = Fore.GREEN  # Healthy - above $10
 
-        print(row_color + f"{indent}{symbol:<12} {spot_balance:>15.6f} ${spot_value_usd:>10.2f} {perp_position:>15.6f} {net_delta:>12.6f} {value_usd:>15,.2f} {imbalance:>11.2f}% {apr_str:>10}" + Style.RESET_ALL)
+        print(row_color + f"{indent}{symbol:<12} {spot_balance:>15.6f} {perp_position:>15.6f} {net_delta:>12.6f} {f'${final_value:,.2f}':>25} {f'{imbalance:.2f}%':>12} {apr_str:>12}" + Style.RESET_ALL)
 
     print(f"{indent}{Fore.CYAN}Total Delta-Neutral Value: ${total_dn_value:,.2f}{Style.RESET_ALL}")
 
@@ -1175,7 +1185,7 @@ def render_other_positions(positions_data, title="Other Holdings (Non-Delta-Neut
 
     print(Fore.GREEN + f"{indent}--- {title} ---" + Style.RESET_ALL)
 
-    header = f"{'Symbol':<12} {'Spot Balance':>15} {'Perp Position':>15} {'Net Delta':>12} {'Value (USD)':>15} {'Imbalance':>12}"
+    header = f"{'Symbol':<12} {'Spot Balance':>15} {'Perp Position':>15} {'Net Delta':>12} {'Value':>15} {'Imbalance':>12}"
     print(f"{indent}{header}")
     print(f"{indent}" + "-" * len(header))
 
@@ -1187,7 +1197,7 @@ def render_other_positions(positions_data, title="Other Holdings (Non-Delta-Neut
         value_usd = pos.get('position_value_usd', 0.0)
         imbalance = pos.get('imbalance_pct', 0.0)
 
-        print(Fore.YELLOW + f"{indent}{symbol:<12} {spot_balance:>15.6f} {perp_position:>15.6f} {net_delta:>12.6f} {value_usd:>15,.2f} {imbalance:>11.2f}%" + Style.RESET_ALL)
+        print(Fore.YELLOW + f"{indent}{symbol:<12} {spot_balance:>15.6f} {perp_position:>15.6f} {net_delta:>12.6f} ${value_usd:>14,.2f} {imbalance:>11.2f}%" + Style.RESET_ALL)
 
 
 def render_opportunities(opportunities_data, title="Potential Opportunities", indent=""):
@@ -1370,7 +1380,7 @@ async def check_portfolio_health():
         # Display position PnL summary
         if position_pnl_data:
             print(Fore.CYAN + "\nPOSITION PnL SUMMARY:" + Style.RESET_ALL)
-            header = f"{'Symbol':<12} {'Value (USD)':<12} {'Spot (USD)':<12} {'Imbalance':<10} {'PnL %':<10}"
+            header = f"{'Symbol':<12} {'Value':<12} {'Imbalance':<10} {'PnL %':<10}"
             print(header)
             print("-" * len(header))
 
@@ -1399,9 +1409,9 @@ async def check_portfolio_health():
                         pnl_str = f"{pnl_pct:+.2f}%"
                 else:
                     pnl_color = Fore.YELLOW
-                    pnl_str = "N/A"
+                    pnl_str = "NA"
 
-                print(f"{row_color}{symbol:<12} ${value_usd:<11.2f} ${spot_value_usd:<11.2f} {imbalance_pct:<9.2f}% {pnl_color}{pnl_str:<10}{Style.RESET_ALL}")
+                print(f"{row_color}{symbol:<12} ${value_usd:<11.2f} {imbalance_pct:<9.2f}% {pnl_color}{pnl_str:<10}{Style.RESET_ALL}")
 
         if not critical_issues and not health_issues:
             print(Fore.GREEN + "\nALL CLEAR: No health issues detected with your positions." + Style.RESET_ALL)
