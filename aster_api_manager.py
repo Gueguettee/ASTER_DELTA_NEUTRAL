@@ -7,10 +7,12 @@ import hashlib
 import json
 import urllib.parse
 import math
+from datetime import datetime
 from decimal import Decimal
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from ASTER_codes.api_client import ApiClient
 from strategy_logic import DeltaNeutralLogic
+from utils import truncate
 
 # Base URLs for the APIs
 FUTURES_BASE_URL = "https://fapi.asterdex.com"
@@ -57,11 +59,7 @@ class AsterApiManager:
 
     def _truncate(self, value: float, precision: int) -> float:
         """Truncates a float to a given precision without rounding."""
-        if precision < 0: precision = 0
-        if precision == 0:
-            return math.floor(value)
-        factor = 10.0 ** precision
-        return math.floor(value * factor) / factor
+        return truncate(value, precision)
 
     async def _get_formatted_order_params(self, symbol: str, market_type: str, price: Optional[float] = None, quantity: Optional[float] = None, quote_quantity: Optional[float] = None) -> dict:
         """Fetches symbol filters and formats order parameters to the correct precision."""
@@ -733,6 +731,197 @@ class AsterApiManager:
             signed=True,
             base_url=FUTURES_BASE_URL
         )
+
+    async def perform_funding_analysis(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Performs a standalone funding analysis for a given symbol.
+        This function is self-contained and fetches all necessary data.
+
+        Args:
+            symbol: Trading symbol to analyze (e.g., 'BTCUSDT')
+
+        Returns:
+            Dict with funding analysis data or None if analysis fails
+        """
+        try:
+            # 1. Fetch all necessary data concurrently
+            all_positions_task = self.get_perp_account_info()
+            spot_balances_task = self.get_spot_account_balances()
+            ticker_task = self.get_perp_book_ticker(symbol)
+
+            all_positions, spot_balances, ticker = await asyncio.gather(
+                all_positions_task, spot_balances_task, ticker_task
+            )
+
+            position = next((p for p in all_positions.get('positions', []) if p.get('symbol') == symbol and Decimal(p.get('positionAmt', '0')) != 0), None)
+
+            if not position:
+                return None
+
+            # Extract data from fetched results
+            current_pos_amount = Decimal(position.get('positionAmt', '0'))
+            position_notional = Decimal(position.get('notional', '0'))
+            unrealized_pnl = Decimal(position.get('unrealizedProfit', '0'))
+            mark_price = Decimal(ticker.get('bidPrice'))
+            base_asset = symbol.replace('USDT', '')
+            spot_balance = next((Decimal(b.get('free', '0')) for b in spot_balances if b.get('asset') == base_asset), Decimal('0'))
+            spot_value_usd = spot_balance * mark_price
+            effective_position_value = spot_value_usd + abs(position_notional) + unrealized_pnl
+
+        except Exception as e:
+            return None
+
+        # 2. Fetch recent trades to find the position's opening time
+        try:
+            trades = await self.get_user_trades(symbol=symbol, limit=1000)
+            if not trades:
+                return None
+
+            trades.sort(key=lambda x: int(x['time']))
+            position_start_time = None
+            running_total = Decimal('0')
+
+            for trade in reversed(trades):
+                trade_qty = Decimal(trade['qty'])
+                if trade['side'].upper() == 'SELL':
+                    trade_qty *= -1
+
+                running_total += trade_qty
+                if abs(running_total - current_pos_amount) < Decimal('0.000001'):
+                    position_start_time = int(trade['time'])
+                    break
+
+            if not position_start_time:
+                return None
+
+            start_datetime = datetime.fromtimestamp(position_start_time / 1000)
+
+        except Exception as e:
+            return None
+
+        # 3. Fetch funding payments since the position was opened
+        try:
+            funding_payments = await self.get_income_history(
+                symbol=symbol,
+                income_type='FUNDING_FEE',
+                start_time=position_start_time,
+                limit=1000
+            )
+
+            total_funding = sum(Decimal(p['income']) for p in funding_payments)
+            funding_percentage = (total_funding / effective_position_value) * 100 if effective_position_value != 0 else Decimal('0')
+
+            FEE_THRESHOLD_PERCENT = Decimal('0.135')
+            fee_coverage_progress = (funding_percentage / FEE_THRESHOLD_PERCENT) * 100 if funding_percentage > 0 else Decimal('0')
+
+            return {
+                "symbol": symbol,
+                "position_amount": current_pos_amount,
+                "position_notional": position_notional,
+                "spot_balance": spot_balance,
+                "effective_position_value": effective_position_value,
+                "position_start_time": start_datetime.strftime('%Y-%m-%d %H:%M:%S'),
+                "funding_payments_count": len(funding_payments),
+                "total_funding": total_funding,
+                "funding_as_percentage_of_effective_value": funding_percentage,
+                "fee_coverage_progress": fee_coverage_progress,
+                "asset": funding_payments[0]['asset'] if funding_payments else 'USDT'
+            }
+
+        except Exception as e:
+            return None
+
+    async def perform_health_check_analysis(self) -> Tuple[List[str], List[str], int, List[Dict[str, Any]]]:
+        """
+        Shared health check logic that analyzes positions and returns health issues.
+
+        Returns:
+            Tuple of (health_issues, critical_issues, dn_positions_count, position_pnl_data)
+        """
+        # Fetch position analysis data
+        results = await asyncio.gather(
+            self.analyze_current_positions(),
+            self.get_perp_account_info(),
+            return_exceptions=True
+        )
+
+        analysis_results = results[0] if isinstance(results[0], dict) else {}
+        perp_account_info = results[1] if isinstance(results[1], dict) else {}
+
+        if not analysis_results:
+            return [], [], 0, []
+
+        # Process positions data into list format
+        all_positions = list(analysis_results.values())
+
+        # Use strategy logic for core health analysis
+        health_issues, critical_issues, dn_positions_count = DeltaNeutralLogic.perform_portfolio_health_analysis(all_positions)
+
+        # Add additional PnL and price-specific checks for delta-neutral positions
+        dn_positions = [p for p in all_positions if p.get('is_delta_neutral')]
+        raw_perp_positions = [p for p in perp_account_info.get('positions', []) if float(p.get('positionAmt', 0)) != 0]
+
+        # Fetch current prices for perpetual positions
+        if raw_perp_positions:
+            price_tasks = [self.get_perp_book_ticker(p['symbol']) for p in raw_perp_positions]
+            price_results = await asyncio.gather(*price_tasks, return_exceptions=True)
+            for i, pos in enumerate(raw_perp_positions):
+                price_data = price_results[i]
+                if not isinstance(price_data, Exception) and price_data.get('bidPrice'):
+                    pos['markPrice'] = (float(price_data['bidPrice']) + float(price_data['askPrice'])) / 2
+
+        # Add PnL and liquidity specific checks and collect position data
+        position_pnl_data = []
+
+        for pos in dn_positions:
+            symbol = pos.get('symbol', 'N/A')
+            spot_balance = pos.get('spot_balance', 0.0)
+
+            # Find corresponding raw perp position to get PnL data and price
+            perp_pos = next((p for p in raw_perp_positions if p.get('symbol') == symbol), None)
+            current_price = 0.0
+            pnl_pct = None
+            position_value_usd = pos.get('position_value_usd', 0.0)
+
+            if perp_pos:
+                entry_price = float(perp_pos.get('entryPrice', 0))
+                mark_price = perp_pos.get('markPrice', entry_price)
+                current_price = mark_price
+                position_amt = float(perp_pos.get('positionAmt', 0))
+
+                # Calculate PnL percentage for short position
+                if entry_price > 0 and position_amt < 0:  # Short position
+                    pnl_pct = ((entry_price - mark_price) / entry_price) * 100
+
+                    # Check for PnL warnings
+                    if pnl_pct <= -50:
+                        critical_issues.append(f"CRITICAL: {symbol} short position PnL: {pnl_pct:.2f}% (below -50%)")
+                    elif pnl_pct <= -25:
+                        health_issues.append(f"WARNING: {symbol} short position PnL: {pnl_pct:.2f}% (below -25%)")
+
+            # Calculate spot position value using current price
+            spot_value_usd = spot_balance * current_price
+
+            # Check spot position value for liquidity concerns
+            if spot_value_usd < 10:
+                if spot_value_usd < 5:
+                    critical_issues.append(f"CRITICAL: {symbol} spot position value: ${spot_value_usd:.2f} (below $5 - impossible to close)")
+                else:
+                    health_issues.append(f"WARNING: {symbol} spot position value: ${spot_value_usd:.2f} (below $10 - rebalancing advised)")
+
+            # Update position with current price for rendering
+            pos['current_price'] = current_price
+
+            # Store position data for display
+            position_pnl_data.append({
+                'symbol': symbol,
+                'position_value_usd': position_value_usd,
+                'pnl_pct': pnl_pct,
+                'imbalance_pct': pos.get('imbalance_pct', 0.0),
+                'spot_value_usd': spot_value_usd
+            })
+
+        return health_issues, critical_issues, dn_positions_count, position_pnl_data
 
     async def close(self):
         """Close the HTTP session and perpetual client session."""

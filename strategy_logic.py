@@ -125,7 +125,6 @@ class DeltaNeutralLogic:
         return sorted(candidates)
 
     @staticmethod
-    @staticmethod
     def analyze_funding_opportunities(
         funding_histories: Dict[str, List[float]],
         spot_prices: Dict[str, float]
@@ -310,7 +309,6 @@ class DeltaNeutralLogic:
         }
 
     @staticmethod
-    @staticmethod
     def determine_rebalance_action(
         health_report: Dict[str, Any]
     ) -> str:
@@ -337,7 +335,6 @@ class DeltaNeutralLogic:
         # Default: Hold position
         return 'ACTION_HOLD'
 
-    @staticmethod
     @staticmethod
     def calculate_rebalance_quantities(
         health_report: Dict[str, Any],
@@ -392,7 +389,6 @@ class DeltaNeutralLogic:
                 'estimated_cost_usd': rebalance_amount * spot_price
             }
 
-    @staticmethod
     @staticmethod
     def validate_strategy_preconditions(
         spot_balance_usdt: float,

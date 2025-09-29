@@ -12,9 +12,11 @@ You don't need to run the bot continuously. You can use it to rebalance USDT bet
 
 ## Core Architecture
 
-The application is built on a three-tier architecture, ensuring a clean separation between exchange communication, strategy computation, and user interaction.
+The application is built on a modular architecture with clear separation of concerns, ensuring maintainability, testability, and code reusability.
 
-### 1. The Exchange Gateway: `aster_api_manager.py`
+### Core Modules
+
+#### 1. The Exchange Gateway: `aster_api_manager.py` (931 lines)
 
 This module serves as the sole communication layer with the Aster DEX. It provides a high-level, unified API manager that abstracts the complexities of interacting with both the Perpetual and Spot markets.
 
@@ -22,8 +24,9 @@ This module serves as the sole communication layer with the Aster DEX. It provid
 - **Authentication:** Handles the unique Ethereum-based signature mechanism for the perpetuals API and the key/secret-based authentication for the spot API.
 - **Data Fetching:** Provides methods to retrieve account balances, positions, order statuses, market data, and exchange trading rules.
 - **Order Execution:** Offers simplified methods to place, manage, and cancel both spot and perpetual orders, automatically handling the required precision formatting for all order parameters.
+- **Position Analysis:** Contains `perform_funding_analysis()` and `perform_health_check_analysis()` methods for comprehensive portfolio monitoring.
 
-### 2. The Brain: `strategy_logic.py`
+#### 2. The Brain: `strategy_logic.py` (518 lines)
 
 This module contains the pure computational logic for the delta-neutral strategy. It is designed to be completely stateless and independent of the live API, which makes it highly testable and reliable. It takes market and account data as input and produces clear, actionable results.
 
@@ -32,15 +35,63 @@ This module contains the pure computational logic for the delta-neutral strategy
 - **Position Sizing:** Calculates the precise quantities for spot and perpetual legs required to establish a delta-neutral position, accounting for existing holdings and exchange-specific rules like minimum notional value.
 - **Risk Management:** Contains logic to assess the health of existing positions by analyzing imbalance and other metrics.
 
-### 3. The UI & Orchestrator: `delta_neutral_bot.py`
+#### 3. The UI & Orchestrator: `delta_neutral_bot.py` (1,004 lines)
 
-This is the main application that brings the other two modules together. It orchestrates the flow of data, presents a terminal-based dashboard to the user, and handles all user interaction.
+This is the main application that brings the other modules together. It orchestrates the flow of data, presents a terminal-based dashboard to the user, and handles all user interaction.
 
 **Key Responsibilities:**
 - **Integration:** Initializes and manages the `AsterApiManager` and `DeltaNeutralLogic` components.
 - **Orchestration:** Runs the main application loop, periodically fetching data, feeding it to the strategy logic, and updating the dashboard.
-- **User Interface:** Renders the terminal dashboard, displaying all relevant portfolio information, open positions, and potential opportunities in a clear and organized manner.
-- **User Interaction:** Handles all keyboard inputs for refreshing data, analyzing paid fundings, and executing the workflows for opening and closing positions.
+- **Interactive Workflows:** Manages user workflows for opening positions, closing positions, analyzing funding, and rebalancing accounts.
+- **Dashboard Rendering:** Coordinates the display of portfolio information by delegating to specialized rendering functions.
+
+### Supporting Modules
+
+#### 4. UI Renderers: `ui_renderers.py` (319 lines)
+
+A collection of pure rendering functions for terminal output, ensuring consistent formatting across all display modes.
+
+**Contains:**
+- `render_funding_rates_table()` - Displays funding rates with APR calculations
+- `render_perpetual_positions_table()` - Shows perpetual positions with PnL analysis
+- `render_portfolio_summary()` - Renders account balance summary
+- `render_delta_neutral_positions()` - Displays delta-neutral position details
+- `render_spot_balances()` - Shows spot asset balances
+- `render_other_positions()` - Displays non-delta-neutral holdings
+- `render_opportunities()` - Lists available trading opportunities
+- `render_funding_analysis_results()` - Displays funding payment analysis
+
+#### 5. CLI Commands: `cli_commands.py` (497 lines)
+
+Standalone command-line interface functions for non-interactive operation and scripting.
+
+**Contains:**
+- `check_available_pairs()` - Lists available delta-neutral pairs
+- `check_current_positions()` - Shows portfolio summary
+- `check_spot_assets()` - Displays spot balances
+- `check_perpetual_positions()` - Shows perpetual positions
+- `check_funding_rates()` - Lists current funding rates
+- `check_portfolio_health()` - Performs health check analysis
+- `rebalance_usdt_cli()` - Rebalances USDT between accounts
+- `open_position_cli()` - Opens a delta-neutral position
+- `close_position_cli()` - Closes a delta-neutral position
+- `analyze_fundings_cli()` - Analyzes funding payments
+
+#### 6. Shared Utilities: `utils.py` (30 lines)
+
+Common utility functions used across multiple modules.
+
+**Contains:**
+- `truncate()` - Precision-aware number truncation for exchange compliance
+
+### Architecture Benefits
+
+- **Modularity**: Each module has a single, well-defined responsibility
+- **Reusability**: UI renderers and CLI commands can be imported and used anywhere
+- **Testability**: Pure functions and clear boundaries enable comprehensive testing
+- **Maintainability**: Changes in one area don't cascade to unrelated code
+- **DRY Principle**: Zero code duplication across the entire codebase
+- **Clean Imports**: Clear dependency graph prevents circular dependencies
 
 ## Running the Application
 
