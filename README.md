@@ -1,10 +1,8 @@
 # ASTER DEX Delta-Neutral Funding Rate Farming Bot
 
-This project is a terminal-based Python application for managing a delta-neutral funding rate farming strategy on the Aster DEX.
+This project is a terminal-based Python application for managing a delta-neutral funding rate farming strategy on the Aster DEX. It provides an interactive dashboard and a comprehensive set of command-line tools to help users identify and manage arbitrage opportunities between Aster's perpetual and spot markets.
 
-**Support this project**: Use referral link https://www.asterdex.com/en/referral/164f81 to get 10% rebate on trading fees (maximum rebate rate for you).
-
-You don't need to run the bot continuously. You can use it to rebalance USDT between Perp and Spot, check the funding rates and opportunities, open and close delta neutral positions, and perform a health check and rebalance once in a while.
+**Support this project**: Use referral link https://www.asterdex.com/en/referral/164f81 to get a 10% rebate on trading fees.
 
 ## Dashboard Preview
 
@@ -14,41 +12,13 @@ You don't need to run the bot continuously. You can use it to rebalance USDT bet
 
 The application is built on a three-tier architecture, ensuring a clean separation between exchange communication, strategy computation, and user interaction.
 
-### 1. The Exchange Gateway: `aster_api_manager.py`
+1.  **`aster_api_manager.py` (The Exchange Gateway):** A high-level, unified API manager for both Aster Perpetual and Spot markets. It handles authentication, data fetching, and order execution, abstracting away the complexities of the different API versions and signing mechanisms.
+2.  **`strategy_logic.py` (The Brain):** Contains the pure, stateless computational logic for the delta-neutral strategy, including opportunity analysis, position sizing, and risk management.
+3.  **`delta_neutral_bot.py` (The UI & Orchestrator):** The main application that integrates the other modules. It presents the terminal-based dashboard, handles all user interaction, and provides a full suite of CLI commands for non-interactive use.
 
-This module serves as the sole communication layer with the Aster DEX. It provides a high-level, unified API manager that abstracts the complexities of interacting with both the Perpetual and Spot markets.
+## Getting Started
 
-**Key Responsibilities:**
-- **Authentication:** Handles the unique Ethereum-based signature mechanism for the perpetuals API and the key/secret-based authentication for the spot API.
-- **Data Fetching:** Provides methods to retrieve account balances, positions, order statuses, market data, and exchange trading rules.
-- **Order Execution:** Offers simplified methods to place, manage, and cancel both spot and perpetual orders, automatically handling the required precision formatting for all order parameters.
-
-### 2. The Brain: `strategy_logic.py`
-
-This module contains the pure computational logic for the delta-neutral strategy. It is designed to be completely stateless and independent of the live API, which makes it highly testable and reliable. It takes market and account data as input and produces clear, actionable results.
-
-**Key Responsibilities:**
-- **Opportunity Analysis:** Identifies viable trading pairs and analyzes funding rate histories to find profitable opportunities.
-- **Position Sizing:** Calculates the precise quantities for spot and perpetual legs required to establish a delta-neutral position, accounting for existing holdings and exchange-specific rules like minimum notional value.
-- **Risk Management:** Contains logic to assess the health of existing positions by analyzing imbalance and other metrics.
-
-### 3. The UI & Orchestrator: `delta_neutral_bot.py`
-
-This is the main application that brings the other two modules together. It orchestrates the flow of data, presents a terminal-based dashboard to the user, and handles all user interaction.
-
-**Key Responsibilities:**
-- **Integration:** Initializes and manages the `AsterApiManager` and `DeltaNeutralLogic` components.
-- **Orchestration:** Runs the main application loop, periodically fetching data, feeding it to the strategy logic, and updating the dashboard.
-- **User Interface:** Renders the terminal dashboard, displaying all relevant portfolio information, open positions, and potential opportunities in a clear and organized manner.
-- **User Interaction:** Handles all keyboard inputs for refreshing data, scanning for opportunities, and executing the workflows for opening and closing positions.
-
-## Running the Application
-
-There are two ways to run the bot: locally using Python or with Docker for development.
-
-### Method 1: Running Locally
-
-#### 1. Install Dependencies
+### 1. Install Dependencies
 
 Ensure you have Python 3 installed. Then, install the required libraries using pip:
 
@@ -56,13 +26,19 @@ Ensure you have Python 3 installed. Then, install the required libraries using p
 pip install -r requirements.txt
 ```
 
-#### 2. Configure Environment Variables
+### 2. Configure Environment Variables
 
-You need to create both **API** and **Pro API** credentials on Aster Finance as shown below:
+You need to create both **API** and **Pro API** credentials on Aster Finance.
 
 ![API Management](APIs.png)
 
-Create a `.env` file in the root directory of the project. This file will store your API credentials securely. Add your keys to the `.env` file as follows:
+Create a `.env` file in the root directory of the project by copying the example file:
+
+```bash
+cp .env.example .env
+```
+
+Then, edit the `.env` file and add your API credentials:
 
 ```
 API_USER=0x...
@@ -72,31 +48,26 @@ APIV1_PUBLIC_KEY=...
 APIV1_PRIVATE_KEY=...
 ```
 
-See also `.env.example.`
+## Running the Application
 
-<img src="infos_API_p1.png" alt="Info API 1" width="600"/>
-<img src="infos_API_p2.png" alt="Info API 1" width="600"/>
+### Interactive Dashboard
 
-#### 3. Run the Bot
-
-Once your dependencies are installed and your `.env` file is configured, you can start the application by running the main script:
+To launch the main interactive dashboard, run the script without any arguments:
 
 ```bash
-# Run the interactive dashboard (default)
 python delta_neutral_bot.py
-
-# Or use CLI commands for specific tasks
-python delta_neutral_bot.py --help
 ```
 
-## CLI Commands
+From the dashboard, you can use keyboard shortcuts to refresh data, open/close positions, scan funding rates, and perform health checks.
 
-The bot now includes comprehensive command-line interface (CLI) functionality for quick data access without starting the full interactive dashboard:
+### Command-Line Interface (CLI)
 
-### Available Commands
+The bot also provides a powerful set of non-interactive CLI commands for scripting and quick checks.
+
+**General Commands:**
 
 ```bash
-# Show all available options, including new health and balance commands
+# Show all available commands
 python delta_neutral_bot.py --help
 
 # Check available delta-neutral trading pairs
@@ -105,92 +76,77 @@ python delta_neutral_bot.py --pairs
 # Show current funding rates with APR calculations
 python delta_neutral_bot.py --funding-rates
 
-# Show current delta-neutral positions and portfolio summary
+# Show a comprehensive summary of all positions and balances
 python delta_neutral_bot.py --positions
 
-# Show current spot asset balances with USD values
+# Show only spot asset balances with USD values
 python delta_neutral_bot.py --spot-assets
 
-# Show current perpetual positions with detailed PnL analysis
+# Show only perpetual positions with detailed PnL analysis
 python delta_neutral_bot.py --perpetual
 
 # Perform a comprehensive health check on all delta-neutral positions
 python delta_neutral_bot.py --health-check
 
-# Automatically rebalance USDT 50/50 between spot and perpetual accounts
+# Rebalance USDT 50/50 between spot and perpetual accounts
 python delta_neutral_bot.py --rebalance
-
-# Run dashboard in test mode (fetch once, then exit)
-python delta_neutral_bot.py --test
 ```
 
-### CLI Features
+**Trading Commands:**
 
-- **Concurrent API Calls**: Optimized performance with async/await patterns
-- **Cross-Platform**: Works on Windows, Linux, and macOS
-- **Colorized Output**: Enhanced readability with color-coded data
-- **Error Handling**: Graceful handling of API timeouts and errors
-- **Price Discovery**: Automatic USD value calculation across multiple quote currencies
-- **Performance Metrics**: Real-time PnL calculations in both USD and percentage
-- **Clean Session Management**: Proper cleanup and resource management
+The `--open` and `--close` commands can be run in two modes:
 
-## Recent Improvements
-
-### Enhanced Dashboard & CLI
-
-- **Advanced Health Check System**:
-  - Interactive (`H` key) and CLI (`--health-check`) functionality with comprehensive position analysis
-  - **Visual Spot Value Monitoring**: Color-coded USD values (Green >$10, Yellow <$10, Red <$5)
-  - **Critical Threshold Warnings**: Automatic alerts when spot positions approach $5 minimum (impossible to close)
-  - **PnL Risk Assessment**: Short position monitoring with warnings at -25% and critical alerts at -50%
-  - **Smart Rebalancing Recommendations**: Contextual advice with direct command suggestions
-  - **Health Criteria Display**: Clear explanation of all monitoring thresholds and color coding
-- **USDT Rebalancing**: Interactive (`B` key) and CLI (`--rebalance`) tool to automatically balance USDT funds 50/50 between spot and perpetual accounts.
-- **Compact Layout**: Optimized spacing for better information density.
-- **Modular Rendering**: All dashboard and CLI sections use reusable common rendering functions.
-- **Real-time Data**: Live perpetual positions with percentage PnL tracking.
-- **Funding Rate Analysis**: Effective APR calculations for 1x leverage strategies.
-- **Portfolio Analytics**: Comprehensive position analysis with delta-neutral detection.
-
-### Code Architecture Enhancements
-
-- **Automated Precision Handling**: All order placement methods now automatically format price and quantity to meet exchange-specific precision requirements.
-- **Fund Transfer API**: Integrated methods to transfer assets between spot and perpetual wallets.
-- **Dynamic Pair Discovery**: The bot now dynamically discovers tradable pairs by checking for their existence in both spot and perpetual markets.
-- **DRY Principle**: Eliminated code duplication with shared rendering and analysis functions.
-- **Consistent Terminology**: Unified "perpetual" naming throughout the codebase.
-- **Error Handling**: Improved API error suppression during price discovery.
-
-### Testing & Quality
-
-- **Comprehensive Testing**: 45+ unit tests covering the API manager, strategy logic, and new CLI commands.
-- **Integration Tests**: Real API validation with automatic credential detection, including tests for live order placement and fund transfers.
-- **Verification Scripts**: Automated validation of core functionality.
-
-### Method 2: Running with Docker (Recommended for Development)
-
-#### 1. Prerequisites
-
-Ensure you have Docker and Docker Compose installed on your system.
-
-#### 2. Configure Environment Variables
-
-Create the `.env` file as described in the local setup. The `docker-compose.yml` file is already configured to load this file. See `.env.example`.
-
-#### 3. Build and Run the Docker Container
-
-Open a terminal in the project's root directory and run:
+1.  **Interactive Mode:** Run the command without arguments to launch a guided workflow.
+2.  **Non-Interactive Mode:** Provide arguments directly on the command line. Use the `--yes` flag to bypass the final confirmation prompt, allowing for use in scripts.
 
 ```bash
+# --- Open a Position ---
+
+# Launch the interactive workflow to select a symbol and enter capital
+python delta_neutral_bot.py --open
+
+# Open a $100 position on BTCUSDT (will show a plan and ask for confirmation)
+python delta_neutral_bot.py --open BTCUSDT 100
+
+# Open a $100 position on BTCUSDT without a confirmation prompt
+python delta_neutral_bot.py --open BTCUSDT 100 --yes
+
+
+# --- Close a Position ---
+
+# Launch the interactive workflow to select a position to close
+python delta_neutral_bot.py --close
+
+# Close the BTCUSDT position (will ask for confirmation)
+python delta_neutral_bot.py --close BTCUSDT
+
+# Close the BTCUSDT position without a confirmation prompt
+python delta_neutral_bot.py --close BTCUSDT --yes
+```
+
+## Testing
+
+The project has a comprehensive test suite covering the API manager, strategy logic, and CLI functionality.
+
+```bash
+# Run all unit tests
+python -m unittest discover -v
+
+# Run integration tests (requires real API credentials in .env)
+python run_integration_tests.py
+```
+
+## Docker Support
+
+For development, you can also build and run the bot using Docker Compose.
+
+```bash
+# Build the image
 docker-compose build
-```
 
-If you add new dependencies to `requirements.txt`, you will need to rebuild the image before running it again.
-
-To start the bot:
-
-```bash
+# Run the bot (e.g., launch the dashboard)
 docker-compose run --rm dn_bot
-```
 
-The `--rm` flag is added to automatically remove the container when the bot stops, which is good practice for one-off commands.
+# Run a CLI command (e.g., check positions)
+docker-compose run --rm dn_bot --positions
+```
