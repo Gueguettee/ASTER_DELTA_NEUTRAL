@@ -38,7 +38,6 @@ class TestAsterApiManager(unittest.IsolatedAsyncioTestCase):
         )
 
         # Assert initialization worked correctly
-        self.assertIsNotNone(manager.perp_client)
         self.assertIsNone(manager.session)  # Session is created lazily
         self.assertEqual(manager.api_user, self.api_user)
         self.assertEqual(manager.apiv1_public, self.apiv1_public)
@@ -157,8 +156,8 @@ class TestAsterApiManager(unittest.IsolatedAsyncioTestCase):
             self.apiv1_public, self.apiv1_private
         )
 
-        # Mock the signed_request method
-        manager.perp_client.signed_request = AsyncMock(return_value=mock_positions)
+        # Mock the _signed_perp_request method
+        manager._signed_perp_request = AsyncMock(return_value=mock_positions)
 
         # Test getting leverage for existing symbol
         leverage = await manager.get_perp_leverage('BTCUSDT')
@@ -189,22 +188,30 @@ class TestAsterApiManager(unittest.IsolatedAsyncioTestCase):
             self.apiv1_public, self.apiv1_private
         )
 
-        # Mock the signed_request method
-        manager.perp_client.signed_request = AsyncMock(return_value=mock_response)
+        # Mock the _make_spot_request method (leverage endpoint uses spot auth)
+        manager._make_spot_request = AsyncMock(return_value=mock_response)
 
         # Test setting leverage to 1 (default for delta-neutral)
         response = await manager.set_perp_leverage('BTCUSDT')
         self.assertEqual(response['leverage'], 1)
 
         # Verify the correct parameters were sent
-        manager.perp_client.signed_request.assert_called_with(
-            'POST', '/fapi/v1/leverage', {'symbol': 'BTCUSDT', 'leverage': 1}
+        manager._make_spot_request.assert_called_with(
+            method='POST',
+            path='/fapi/v1/leverage',
+            params={'symbol': 'BTCUSDT', 'leverage': 1},
+            signed=True,
+            base_url='https://fapi.asterdex.com'
         )
 
         # Test setting custom leverage
         await manager.set_perp_leverage('BTCUSDT', 5)
-        manager.perp_client.signed_request.assert_called_with(
-            'POST', '/fapi/v1/leverage', {'symbol': 'BTCUSDT', 'leverage': 5}
+        manager._make_spot_request.assert_called_with(
+            method='POST',
+            path='/fapi/v1/leverage',
+            params={'symbol': 'BTCUSDT', 'leverage': 5},
+            signed=True,
+            base_url='https://fapi.asterdex.com'
         )
 
         await manager.close()
@@ -244,9 +251,27 @@ class TestAsterApiManager(unittest.IsolatedAsyncioTestCase):
             self.apiv1_public, self.apiv1_private
         )
 
+        # Mock exchange info
+        mock_perp_info = {
+            'symbols': [
+                {
+                    'symbol': 'BTCUSDT',
+                    'baseAsset': 'BTC',
+                    'quoteAsset': 'USDT'
+                },
+                {
+                    'symbol': 'ETHUSDT',
+                    'baseAsset': 'ETH',
+                    'quoteAsset': 'USDT'
+                }
+            ]
+        }
+
         # Mock all the required methods
         manager.get_perp_account_info = AsyncMock(return_value=mock_perp_account)
         manager.get_spot_account_balances = AsyncMock(return_value=mock_spot_balances)
+        manager._get_perp_exchange_info = AsyncMock(return_value=mock_perp_info)
+        manager._get_spot_exchange_info = AsyncMock(return_value=mock_perp_info)
         manager.get_perp_leverage = AsyncMock(return_value=1)
 
         # Test position analysis
