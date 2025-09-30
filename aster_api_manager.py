@@ -10,7 +10,10 @@ import math
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, List, Optional, Any, Tuple
-from ASTER_codes.api_client import ApiClient
+from web3 import Web3
+from eth_account import Account
+from eth_account.messages import encode_defunct
+from eth_abi import encode
 from strategy_logic import DeltaNeutralLogic
 from utils import truncate
 
@@ -30,16 +33,111 @@ class AsterApiManager:
         """
         Initialize the API manager with all required credentials.
         """
+        # Validate Ethereum credentials
+        if not api_user or not Web3.is_address(api_user):
+            raise ValueError("API_USER is missing or not a valid Ethereum address.")
+        if not api_signer or not Web3.is_address(api_signer):
+            raise ValueError("API_SIGNER is missing or not a valid Ethereum address.")
+        if not api_private_key:
+            raise ValueError("API_PRIVATE_KEY is missing.")
+
         self.api_user = api_user
         self.api_signer = api_signer
         self.api_private_key = api_private_key
         self.apiv1_public = apiv1_public
         self.apiv1_private = apiv1_private
 
-        self.perp_client = ApiClient(api_user, api_signer, api_private_key)
         self.session = None
         self.spot_exchange_info = None
         self.perp_exchange_info = None
+
+    # --- Ethereum Signature Methods (for Perpetuals API) ---
+
+    def _trim_dict(self, my_dict: dict) -> dict:
+        """Recursively converts all values in a dictionary to strings for signature generation."""
+        for key, value in my_dict.items():
+            if isinstance(value, list):
+                new_value = []
+                for item in value:
+                    if isinstance(item, dict):
+                        new_value.append(json.dumps(self._trim_dict(item)))
+                    else:
+                        new_value.append(str(item))
+                my_dict[key] = json.dumps(new_value)
+            elif isinstance(value, dict):
+                my_dict[key] = json.dumps(self._trim_dict(value))
+            else:
+                my_dict[key] = str(value)
+        return my_dict
+
+    def _sign_perp_request(self, params: dict) -> dict:
+        """Signs perpetual API request parameters using Ethereum signature."""
+        nonce = math.trunc(time.time() * 1000000)
+        my_dict = {k: v for k, v in params.items() if v is not None}
+        my_dict["recvWindow"] = 50000
+        my_dict["timestamp"] = int(round(time.time() * 1000))
+
+        # Convert all values to strings
+        self._trim_dict(my_dict)
+
+        # Create the JSON string exactly as in the documentation
+        json_str = json.dumps(my_dict, sort_keys=True).replace(' ', '')
+
+        # Encode and hash
+        encoded = encode(['string', 'address', 'address', 'uint256'],
+                         [json_str, self.api_user, self.api_signer, nonce])
+        keccak_hex = Web3.keccak(encoded).hex()
+
+        # Sign the message
+        signable_msg = encode_defunct(hexstr=keccak_hex)
+        signed_message = Account.sign_message(signable_message=signable_msg, private_key=self.api_private_key)
+
+        # Append auth data to the dictionary
+        my_dict['nonce'] = nonce
+        my_dict['user'] = self.api_user
+        my_dict['signer'] = self.api_signer
+        my_dict['signature'] = '0x' + signed_message.signature.hex()
+
+        return my_dict
+
+    async def _signed_perp_request(self, method: str, endpoint: str, params: dict = None) -> dict:
+        """Generic method for making signed requests to the Perpetuals API."""
+        if params is None:
+            params = {}
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+
+        url = f"{FUTURES_BASE_URL}{endpoint}"
+        signed_params = self._sign_perp_request(params)
+        headers = {'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'PythonApp/1.0'}
+
+        if method.upper() == 'GET':
+            query_string = urllib.parse.urlencode(signed_params)
+            full_url = f"{url}?{query_string}"
+            async with self.session.get(full_url, headers=headers) as response:
+                if not response.ok:
+                    error_body = await response.text()
+                    print(f"API Error on {method} {endpoint}: Status={response.status}, Body={error_body}")
+                response.raise_for_status()
+                return await response.json()
+
+        elif method.upper() == 'POST':
+            async with self.session.post(url, data=signed_params, headers=headers) as response:
+                if not response.ok:
+                    error_body = await response.text()
+                    print(f"API Error on {method} {endpoint}: Status={response.status}, Body={error_body}")
+                response.raise_for_status()
+                return await response.json()
+
+        elif method.upper() == 'DELETE':
+            async with self.session.delete(url, data=signed_params, headers=headers) as response:
+                if not response.ok:
+                    error_body = await response.text()
+                    print(f"API Error on {method} {endpoint}: Status={response.status}, Body={error_body}")
+                response.raise_for_status()
+                return await response.json()
+        else:
+            raise ValueError(f"Unsupported HTTP method: {method}")
 
     # --- Exchange Info and Formatting Helpers ---
 
@@ -52,9 +150,12 @@ class AsterApiManager:
     async def _get_perp_exchange_info(self, force_refresh: bool = False) -> dict:
         """Fetches and caches perpetual exchange information."""
         if not self.perp_exchange_info or force_refresh:
-            if not self.perp_client.session:
-                self.perp_client.session = aiohttp.ClientSession()
-            self.perp_exchange_info = await self.perp_client.get_exchange_info()
+            if not self.session:
+                self.session = aiohttp.ClientSession()
+            url = f"{FUTURES_BASE_URL}/fapi/v1/exchangeInfo"
+            async with self.session.get(url) as response:
+                response.raise_for_status()
+                self.perp_exchange_info = await response.json()
         return self.perp_exchange_info
 
     def _truncate(self, value: float, precision: int) -> float:
@@ -140,9 +241,7 @@ class AsterApiManager:
 
     async def get_perp_account_info(self) -> dict:
         """Get perpetuals account information."""
-        if not self.perp_client.session:
-            self.perp_client.session = aiohttp.ClientSession()
-        return await self.perp_client.signed_request('GET', '/fapi/v3/account')
+        return await self._signed_perp_request('GET', '/fapi/v3/account')
 
     async def get_spot_account_balances(self) -> list:
         """Get spot account balances."""
@@ -151,21 +250,21 @@ class AsterApiManager:
 
     async def get_funding_rate_history(self, symbol: str, limit: int = 50) -> list:
         """Get funding rate history for a symbol."""
-        if not self.perp_client.session:
-            self.perp_client.session = aiohttp.ClientSession()
+        if not self.session:
+            self.session = aiohttp.ClientSession()
         url = f"{FUTURES_BASE_URL}/fapi/v1/fundingRate"
         params = {'symbol': symbol, 'limit': limit}
-        async with self.perp_client.session.get(url, params=params) as response:
+        async with self.session.get(url, params=params) as response:
             response.raise_for_status()
             return await response.json()
 
     async def get_perp_book_ticker(self, symbol: str) -> dict:
         """Get perpetuals book ticker for a symbol."""
-        if not self.perp_client.session:
-            self.perp_client.session = aiohttp.ClientSession()
+        if not self.session:
+            self.session = aiohttp.ClientSession()
         url = f"{FUTURES_BASE_URL}/fapi/v1/ticker/bookTicker"
         params = {'symbol': symbol}
-        async with self.perp_client.session.get(url, params=params) as response:
+        async with self.session.get(url, params=params) as response:
             response.raise_for_status()
             return await response.json()
 
@@ -177,30 +276,32 @@ class AsterApiManager:
 
     async def place_perp_order(self, symbol: str, price: str, quantity: str, side: str, reduce_only: bool = False) -> dict:
         """Place a perpetuals limit order with correct precision."""
-        if not self.perp_client.session:
-            self.perp_client.session = aiohttp.ClientSession()
-        
         formatted_params = await self._get_formatted_order_params(
             symbol=symbol, market_type='perp', price=float(price), quantity=float(quantity)
         )
-        return await self.perp_client.place_order(symbol, formatted_params['price'], formatted_params['quantity'], side, reduce_only)
+
+        params = {
+            "symbol": symbol, "side": side, "type": "LIMIT",
+            "timeInForce": "GTX", "price": formatted_params['price'],
+            "quantity": formatted_params['quantity'], "positionSide": "BOTH"
+        }
+        if reduce_only:
+            params['reduceOnly'] = 'true'
+        return await self._signed_perp_request('POST', '/fapi/v3/order', params)
 
     async def place_perp_market_order(self, symbol: str, quantity: str, side: str) -> dict:
         """Place a perpetuals market order with correct precision."""
-        if not self.perp_client.session:
-            self.perp_client.session = aiohttp.ClientSession()
-        
         formatted_params = await self._get_formatted_order_params(
             symbol=symbol, market_type='perp', quantity=float(quantity)
         )
-        
+
         params = {
             'symbol': symbol,
             'side': side,
             'type': 'MARKET',
             'quantity': formatted_params['quantity']
         }
-        return await self.perp_client.signed_request('POST', '/fapi/v3/order', params)
+        return await self._signed_perp_request('POST', '/fapi/v3/order', params)
 
     async def place_spot_buy_market_order(self, symbol: str, quote_quantity: str) -> dict:
         """Place a spot market buy order with correct precision."""
@@ -220,9 +321,6 @@ class AsterApiManager:
 
     async def close_perp_position(self, symbol: str, quantity: str, side_to_close: str) -> dict:
         """Close a perpetuals position using a market order with correct precision."""
-        if not self.perp_client.session:
-            self.perp_client.session = aiohttp.ClientSession()
-
         formatted_params = await self._get_formatted_order_params(
             symbol=symbol, market_type='perp', quantity=float(quantity)
         )
@@ -230,7 +328,7 @@ class AsterApiManager:
             'symbol': symbol, 'side': side_to_close, 'type': 'MARKET',
             'quantity': formatted_params['quantity'], 'reduceOnly': 'true', 'positionSide': 'BOTH'
         }
-        return await self.perp_client.signed_request('POST', '/fapi/v3/order', params)
+        return await self._signed_perp_request('POST', '/fapi/v3/order', params)
 
     async def get_perp_leverage(self, symbol: str) -> int:
         """Get current leverage for a perpetual trading symbol."""
@@ -240,7 +338,7 @@ class AsterApiManager:
             positions = account_info.get('positions', [])
         except:
             # Fallback for test mocks that return positions list directly
-            positions = await self.perp_client.signed_request('GET', '/fapi/v2/account', {})
+            positions = await self._signed_perp_request('GET', '/fapi/v2/account', {})
             if isinstance(positions, list):
                 # Test mock format
                 pass
@@ -294,9 +392,6 @@ class AsterApiManager:
         Returns:
             Transfer response with transaction ID and status
         """
-        if not self.perp_client.session:
-            self.perp_client.session = aiohttp.ClientSession()
-
         # Generate unique transaction ID
         client_tran_id = f"transfer_{int(time.time() * 1000000)}"
 
@@ -316,7 +411,7 @@ class AsterApiManager:
             'kindType': direction_map[direction]
         }
 
-        return await self.perp_client.signed_request('POST', '/fapi/v3/asset/wallet/transfer', params)
+        return await self._signed_perp_request('POST', '/fapi/v3/asset/wallet/transfer', params)
 
     async def rebalance_usdt_50_50(self) -> dict:
         """
@@ -924,8 +1019,6 @@ class AsterApiManager:
         return health_issues, critical_issues, dn_positions_count, position_pnl_data
 
     async def close(self):
-        """Close the HTTP session and perpetual client session."""
+        """Close the HTTP session."""
         if self.session and not self.session.closed:
             await self.session.close()
-        if self.perp_client.session and not self.perp_client.session.closed:
-            await self.perp_client.session.close()
