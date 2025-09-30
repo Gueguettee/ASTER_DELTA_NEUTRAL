@@ -1,0 +1,9 @@
+.env
+logs
+lighter_data
+params/*.csv
+.DS_Store
+**/secrets/*
+gueguette.json
+aws_instance.json
+aws_credentials.json
